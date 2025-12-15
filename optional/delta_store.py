@@ -142,7 +142,10 @@ class DeltaStore:
                 sentiment_score = snapshot.sentiment_score
                 organic_mentions = snapshot.organic_mentions
                 news_mentions = snapshot.news_mentions
-                weighted_mentions = None  # Will need to calculate
+                # Calculate weighted mentions similar to narrative_enricher.py
+                from elfa_client import calculate_weighted_mentions
+                weighted_data = calculate_weighted_mentions(snapshot)
+                weighted_mentions = weighted_data.get("weighted_mentions")
                 platform = snapshot.platform
             else:
                 print(f"Warning: Unsupported snapshot type: {type(snapshot)}")

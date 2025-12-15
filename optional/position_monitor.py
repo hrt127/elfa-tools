@@ -246,6 +246,9 @@ def monitor_loop(interval_seconds: int = 300):
                     if result.get('sentiment') is not None:
                         sentiment_label = "Bullish" if result['sentiment'] > 0.2 else "Bearish" if result['sentiment'] < -0.2 else "Neutral"
                         print(f"  Sentiment: {result['sentiment']:+.2f} ({sentiment_label})")
+                    if result.get('organic_mentions', 0) > 0 or result.get('news_mentions', 0) > 0:
+                        organic_ratio = result.get('organic_mentions', 0) / max(result['mentions'], 1)
+                        print(f"  Mentions breakdown: {result.get('organic_mentions', 0)} organic, {result.get('news_mentions', 0)} news ({organic_ratio:.0%} organic)")
                     
                     # Alert if warning
                     if result['warning']:

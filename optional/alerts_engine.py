@@ -234,12 +234,17 @@ class AlertsEngine:
                 elif isinstance(data, EnrichedSnapshot):
                     is_organic = organic_mentions > 0 or news_mentions == 0
                 
+                # Calculate news_ratio for alert templates
+                total_mentions = data.total_mentions
+                news_ratio = news_mentions / total_mentions if total_mentions > 0 else 0.0
+                
                 return {
                     'ticker': data.ticker,
-                    'mentions': data.total_mentions,
+                    'mentions': total_mentions,
                     'weighted_mentions': weighted_mentions,
                     'organic_mentions': organic_mentions,
                     'news_mentions': news_mentions,
+                    'news_ratio': news_ratio,
                     'is_organic': is_organic,
                     'sentiment_score': getattr(data, 'sentiment_score', None),
                     'mindshare': data.mindshare_score,

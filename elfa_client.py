@@ -7,6 +7,22 @@ from typing import List, Optional, Dict, Any, Tuple, TypeVar
 from collections import defaultdict
 import requests  # pyright: ignore[reportMissingModuleSource]
 
+# Create a session for connection pooling and better performance
+_session: Optional[requests.Session] = None
+
+def _get_session() -> requests.Session:
+    """Get or create a requests session for connection pooling."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        # Set default headers
+        _session.headers.update({
+            'User-Agent': 'ElfaTools/1.0 (Python)',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate'
+        })
+    return _session
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -123,6 +139,73 @@ def _cache_result(cache_key: str, result: Any, ttl: int = None) -> None:
     _cache[cache_key] = (result, expiry_time)
 
 
+def _make_api_request(
+    url: str,
+    headers: Dict[str, str],
+    params: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+    timeout: int = 15
+) -> Optional[requests.Response]:
+    """
+    Make an API request with automatic retry logic for transient errors.
+    
+    Args:
+        url: Request URL
+        headers: Request headers
+        params: Query parameters
+        max_retries: Maximum number of retry attempts
+        retry_delay: Base delay between retries (exponential backoff)
+        timeout: Request timeout in seconds
+    
+    Returns:
+        Response object or None if all retries failed
+    """
+    session = _get_session()
+    
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url, headers=headers, params=params, timeout=timeout)
+            
+            # If successful or non-retryable error, return immediately
+            if response.status_code == 200:
+                return response
+            elif response.status_code in [401, 404]:
+                # Don't retry auth or not found errors
+                return response
+            elif response.status_code == 500 and attempt < max_retries - 1:
+                # Retry 500 errors with exponential backoff
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Warning: Server error (500) on attempt {attempt + 1}/{max_retries}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+            elif response.status_code == 429 and attempt < max_retries - 1:
+                # Retry rate limit errors
+                retry_after = int(response.headers.get("Retry-After", 60))
+                wait_time = min(retry_after, retry_delay * (2 ** attempt))
+                print(f"Warning: Rate limited (429) on attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                # Other errors or final attempt
+                return response
+                
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Warning: Connection error on attempt {attempt + 1}/{max_retries}: {str(e)[:100]}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                print(f"Warning: Connection failed after {max_retries} attempts: {str(e)[:200]}")
+                return None
+        except Exception as e:
+            print(f"Warning: Unexpected error during API request: {str(e)[:200]}")
+            return None
+    
+    return None
+
+
 def get_ticker_narrative_snapshot(
     ticker: str,
     window: str = "1h",
@@ -164,9 +247,22 @@ def get_ticker_narrative_snapshot(
             print("Warning: Rate limit reached. Please wait before making more requests.")
             return None
 
+        # Validate inputs to prevent server-side errors
+        ticker = str(ticker).strip().upper()
+        if not ticker or len(ticker) > 20:
+            print(f"Warning: Invalid ticker format: {ticker}")
+            return None
+        
+        # Validate window format
+        valid_windows = ["1h", "4h", "24h", "1d", "7d"]
+        if window not in valid_windows:
+            print(f"Warning: Invalid window format: {window}. Using '1h' as fallback.")
+            window = "1h"
+        
         headers = {
             "x-elfa-api-key": api_key,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "ElfaTools/1.0 (Python)"
         }
 
         url = f"{base_url}{endpoint}"
@@ -179,172 +275,190 @@ def get_ticker_narrative_snapshot(
         
         # Add source parameter if specified (for platform filtering)
         if source:
-            params["source"] = source
+            params["source"] = str(source).strip().lower()
 
         # Build source_query for audit trail
         source_query = f"GET {url}?ticker={ticker}&timeWindow={window}&page=0&pageSize=10"
         if source:
             source_query += f"&source={source}"
 
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+        # Use the retry-enabled request helper
+        response = _make_api_request(url, headers, params, max_retries=3, retry_delay=2.0, timeout=15)
+        
+        if response is None:
+            return None
 
-            # Handle rate limiting (429)
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
-                # Update rate limit tracker
-                _rate_limit_tracker[endpoint].clear()  # Reset to force wait
-                return None
+        # Handle rate limiting (429)
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 60))
+            # Update rate limit tracker
+            _rate_limit_tracker[endpoint].clear()  # Reset to force wait
+            return None
 
-            # Handle other HTTP errors
-            if response.status_code == 401:
-                print("Warning: API authentication failed (401). Check your API key.")
-                return None
+        # Handle other HTTP errors
+        if response.status_code == 401:
+            print("Warning: API authentication failed (401). Check your API key.")
+            print(f"      Request: {source_query}")
+            return None
 
-            if response.status_code == 404:
-                print(f"Warning: API endpoint not found (404) for ticker {ticker}.")
-                return None
+        if response.status_code == 404:
+            print(f"Warning: API endpoint not found (404) for ticker {ticker}.")
+            print(f"      Request: {source_query}")
+            return None
 
-            if response.status_code >= 400:
-                error_msg = f"Warning: API returned error {response.status_code}"
+        if response.status_code >= 400:
+            error_msg = f"Warning: API returned error {response.status_code}"
+            try:
+                # Try to parse JSON error response
                 try:
-                    error_body = response.text[:200]
+                    error_json = response.json()
+                    if isinstance(error_json, dict):
+                        error_detail = error_json.get('error', error_json.get('message', error_json.get('detail', '')))
+                        if error_detail:
+                            error_msg += f": {error_detail}"
+                except:
+                    # Fall back to text
+                    error_body = response.text[:500]  # Increased from 200
                     if error_body:
                         error_msg += f": {error_body}"
-                except:
-                    pass
-                print(error_msg)
-                
-                # For 500 errors, provide helpful context
-                if response.status_code == 500:
-                    print("Note: This is a server-side error from Elfa's API. The request format is correct.")
-                    print("      This may be a temporary issue. Try again in a few minutes.")
-                    print("      If the problem persists, contact Elfa support with the error ID above.")
-                
-                return None
+            except:
+                pass
+            
+            print(error_msg)
+            print(f"      Request URL: {url}")
+            print(f"      Request params: {params}")
+            print(f"      Response headers: {dict(response.headers)}")
+            
+            # For 500 errors, provide helpful context and suggestions
+            if response.status_code == 500:
+                print("\nNote: This is a server-side error from Elfa's API.")
+                print("      Troubleshooting steps:")
+                print("      1. Verify your API key is valid and has proper permissions")
+                print("      2. Check if the ticker symbol is correct and supported")
+                print("      3. Try a different time window (1h, 4h, 24h)")
+                print("      4. Wait a few minutes and retry (may be temporary server issue)")
+                print("      5. Check Elfa API status page if available")
+                print(f"      6. Request details: {source_query}")
+            
+            return None
 
-            # Parse response
+        # Parse response
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            print(f"Warning: Failed to parse JSON response: {str(e)[:200]}")
+            return None
+
+        # The response is expected to be a dict with a "results" field containing narratives for tickers.
+        # We try to find the entry matching the requested ticker (in case of case mismatch or symbol format).
+        results = data.get("results", [])
+        ticker_data = None
+        for entry in results:
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("ticker", "")).upper() == ticker.upper()
+            ):
+                ticker_data = entry
+                break
+
+        # Only return data if exact ticker match found (no fallback to avoid wrong data)
+        if ticker_data is None:
+            print(f"Warning: No narrative data found for ticker {ticker}.")
+            return None
+
+        total_mentions = ticker_data.get("total_mentions") or ticker_data.get("mentions") or ticker_data.get("count") or 0
+        mindshare_score = ticker_data.get("mindshare_score") or ticker_data.get("mindshare") or ticker_data.get("score")
+        
+        # Extract sentiment score (if available)
+        sentiment_score = ticker_data.get("sentiment_score") or ticker_data.get("sentiment")
+        if sentiment_score is not None:
             try:
-                data = response.json()
-            except (ValueError, TypeError) as e:
-                print(f"Warning: Failed to parse JSON response: {str(e)[:200]}")
-                return None
+                sentiment_score = float(sentiment_score)
+            except (ValueError, TypeError):
+                sentiment_score = None
+        
+        top_smart_accounts = []
+        account_details = []
+        news_mentions = 0
+        organic_mentions = int(total_mentions) if total_mentions else 0
 
-            # The response is expected to be a dict with a "results" field containing narratives for tickers.
-            # We try to find the entry matching the requested ticker (in case of case mismatch or symbol format).
-            results = data.get("results", [])
-            ticker_data = None
-            for entry in results:
-                if (
-                    isinstance(entry, dict)
-                    and str(entry.get("ticker", "")).upper() == ticker.upper()
-                ):
-                    ticker_data = entry
-                    break
+        accounts_data = (
+            ticker_data.get("top_smart_accounts") or
+            ticker_data.get("smart_accounts") or
+            ticker_data.get("accounts") or
+            ticker_data.get("top_accounts") or
+            []
+        )
 
-            # Only return data if exact ticker match found (no fallback to avoid wrong data)
-            if ticker_data is None:
-                print(f"Warning: No narrative data found for ticker {ticker}.")
-                return None
-
-            total_mentions = ticker_data.get("total_mentions") or ticker_data.get("mentions") or ticker_data.get("count") or 0
-            mindshare_score = ticker_data.get("mindshare_score") or ticker_data.get("mindshare") or ticker_data.get("score")
-            
-            # Extract sentiment score (if available)
-            sentiment_score = ticker_data.get("sentiment_score") or ticker_data.get("sentiment")
-            if sentiment_score is not None:
-                try:
-                    sentiment_score = float(sentiment_score)
-                except (ValueError, TypeError):
-                    sentiment_score = None
-            
-            top_smart_accounts = []
-            account_details = []
-            news_mentions = 0
-            organic_mentions = int(total_mentions) if total_mentions else 0
-
-            accounts_data = (
-                ticker_data.get("top_smart_accounts") or
-                ticker_data.get("smart_accounts") or
-                ticker_data.get("accounts") or
-                ticker_data.get("top_accounts") or
-                []
-            )
-
-            if isinstance(accounts_data, list):
-                for account in accounts_data[:10]:  # Extract more accounts for type analysis
-                    if isinstance(account, dict):
-                        username = (
-                            account.get("username") or
-                            account.get("handle") or
-                            account.get("account") or
-                            account.get("name") or
-                            str(account.get("id", ""))
+        if isinstance(accounts_data, list):
+            for account in accounts_data[:10]:  # Extract more accounts for type analysis
+                if isinstance(account, dict):
+                    username = (
+                        account.get("username") or
+                        account.get("handle") or
+                        account.get("account") or
+                        account.get("name") or
+                        str(account.get("id", ""))
+                    )
+                    if username:
+                        # Extract account type if available
+                        account_type = account.get("type") or account.get("account_type")
+                        if account_type:
+                            account_type = str(account_type).lower()
+                            if account_type not in ["smart", "ct", "news"]:
+                                account_type = None
+                        
+                        # Count news accounts
+                        if account_type == "news":
+                            news_mentions += 1
+                        
+                        account_info = AccountInfo(
+                            username=username,
+                            account_type=account_type,
+                            platform=None  # Will be set if source filtering is used
                         )
-                        if username:
-                            # Extract account type if available
-                            account_type = account.get("type") or account.get("account_type")
-                            if account_type:
-                                account_type = str(account_type).lower()
-                                if account_type not in ["smart", "ct", "news"]:
-                                    account_type = None
-                            
-                            # Count news accounts
-                            if account_type == "news":
-                                news_mentions += 1
-                            
-                            account_info = AccountInfo(
-                                username=username,
-                                account_type=account_type,
-                                platform=None  # Will be set if source filtering is used
-                            )
-                            account_details.append(account_info)
-                            
-                            # Keep top 3 for backward compatibility
-                            if len(top_smart_accounts) < 3:
-                                top_smart_accounts.append(username)
-                    elif isinstance(account, str):
-                        top_smart_accounts.append(account)
-                        account_details.append(AccountInfo(username=account))
+                        account_details.append(account_info)
+                        
+                        # Keep top 3 for backward compatibility
+                        if len(top_smart_accounts) < 3:
+                            top_smart_accounts.append(username)
+                elif isinstance(account, str):
+                    top_smart_accounts.append(account)
+                    account_details.append(AccountInfo(username=account))
 
-            # Calculate organic mentions (excluding news)
-            if news_mentions > 0:
-                organic_mentions = max(0, organic_mentions - news_mentions)
+        # Calculate organic mentions (excluding news)
+        if news_mentions > 0:
+            organic_mentions = max(0, organic_mentions - news_mentions)
 
-            result = TickerNarrativeSnapshot(
-                ticker=ticker,
-                window=window,
-                total_mentions=int(total_mentions) if total_mentions else 0,
-                mindshare_score=float(mindshare_score) if mindshare_score is not None else None,
-                top_smart_accounts=top_smart_accounts[:3],
-                source_query=source_query,
-                sentiment_score=sentiment_score,
-                account_details=account_details,
-                platform=source,  # Set platform from source parameter
-                news_mentions=news_mentions,
-                organic_mentions=organic_mentions
-            )
+        result = TickerNarrativeSnapshot(
+            ticker=ticker,
+            window=window,
+            total_mentions=int(total_mentions) if total_mentions else 0,
+            mindshare_score=float(mindshare_score) if mindshare_score is not None else None,
+            top_smart_accounts=top_smart_accounts[:3],
+            source_query=source_query,
+            sentiment_score=sentiment_score,
+            account_details=account_details,
+            platform=source,  # Set platform from source parameter
+            news_mentions=news_mentions,
+            organic_mentions=organic_mentions
+        )
 
-            # Cache the result
-            if use_cache:
-                _cache_result(cache_key, result)
+        # Cache the result
+        if use_cache:
+            _cache_result(cache_key, result)
 
-            return result
+        return result
 
-        except requests.exceptions.Timeout:
-            print("Warning: API request timed out.")
-            return None
-        except requests.exceptions.ConnectionError:
-            print("Warning: Could not connect to Elfa API. Check your internet connection.")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"Warning: API request failed: {str(e)[:200]}")
-            return None
-        except Exception as e:
-            # Catch-all for any unexpected errors - never crash
-            print(f"Warning: Unexpected error occurred: {str(e)[:200]}")
-            return None
-
+    except requests.exceptions.Timeout:
+        print("Warning: API request timed out.")
+        return None
+    except requests.exceptions.ConnectionError:
+        print("Warning: Could not connect to Elfa API. Check your internet connection.")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Warning: API request failed: {str(e)[:200]}")
+        return None
     except Exception as e:
         # Ultimate safety net - catch absolutely everything
         print(f"Warning: Unexpected error in get_ticker_narrative_snapshot: {str(e)[:200]}")
