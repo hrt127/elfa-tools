@@ -117,15 +117,34 @@ def get_onchain_data(
                 return cached_result
         
         # Check rate limiting for primary provider
-        if _is_rate_limited(api_provider, max_requests=10, window_seconds=60):
+        primary_rate_limited = _is_rate_limited(api_provider, max_requests=10, window_seconds=60)
+        if primary_rate_limited:
             if use_fallback:
                 print(f"Warning: Rate limit reached for {api_provider}, trying fallback providers...")
+                # Skip the rate-limited primary provider in fallback chain
+                if fallback_providers is None:
+                    from optional.provider_registry import list_providers
+                    fallback_providers = list_providers()
+                # Remove primary from fallback list and use first fallback as primary
+                fallback_list = [p for p in fallback_providers if p.lower() != api_provider.lower()]
+                if fallback_list:
+                    # Use first fallback as new primary, rest as fallbacks
+                    new_primary = fallback_list[0]
+                    remaining_fallbacks = fallback_list[1:] if len(fallback_list) > 1 else []
+                    from optional.provider_registry import fetch_with_fallback
+                    result = fetch_with_fallback(
+                        ticker=ticker,
+                        primary_provider=new_primary,
+                        fallback_providers=remaining_fallbacks
+                    )
+                else:
+                    print(f"Warning: No fallback providers available after excluding rate-limited {api_provider}")
+                    return None
             else:
                 print(f"Warning: Rate limit reached for {api_provider}")
                 return None
-        
-        # Use provider registry with fallback if enabled
-        if use_fallback:
+        elif use_fallback:
+            # Primary not rate-limited, use normal fallback
             from optional.provider_registry import fetch_with_fallback
             result = fetch_with_fallback(
                 ticker=ticker,
@@ -134,10 +153,11 @@ def get_onchain_data(
             )
         else:
             # Single provider mode (legacy behavior)
-            from optional.provider_registry import get_provider
+            from optional.provider_registry import get_provider, list_providers
             provider_fn = get_provider(api_provider)
             if not provider_fn:
-                print(f"Warning: Unknown provider '{api_provider}'. Available: {', '.join(get_provider.__module__)}")
+                available = list_providers()
+                print(f"Warning: Unknown provider '{api_provider}'. Available: {', '.join(available)}")
                 return None
             result = provider_fn(ticker)
         

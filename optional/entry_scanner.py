@@ -209,11 +209,22 @@ class EntryScanner:
                     direction = "spike" if anomaly['z_score'] > 0 else "drop"
                     reasoning.append(f"🚨 Statistical anomaly: {anomaly['z_score']:+.1f}σ ({direction})")
                 
-                # 4. Smart Money
-                if enriched.top_smart_accounts and len(enriched.top_smart_accounts) >= 3:
+                # 4. Smart Money Activity (consistent with scan_ticker)
+                if enriched.new_accounts and len(enriched.new_accounts) >= 2:
                     setups.append("smart_money")
-                    conviction += 0.25
-                    reasoning.append(f"💡 Smart money activity: {len(enriched.top_smart_accounts)} accounts")
+                    conviction += 0.15
+                    reasoning.append(f"💡 Smart money: {len(enriched.new_accounts)} new accounts")
+                
+                # 5. High Confidence Composite Signal (consistent with scan_ticker)
+                if signal and signal.confidence > 0.7:
+                    if signal.signal_strength.value in ["strong_bullish", "bullish"]:
+                        setups.append("composite_bullish")
+                        conviction += 0.1
+                        reasoning.append(f"✅ High-confidence bullish signal ({signal.confidence:.0%})")
+                    elif signal.signal_strength.value in ["strong_bearish", "bearish"]:
+                        setups.append("composite_bearish")
+                        conviction += 0.1
+                        reasoning.append(f"✅ High-confidence bearish signal ({signal.confidence:.0%})")
                 
                 results.append({
                     'ticker': enriched.ticker,
