@@ -28,7 +28,7 @@ from pathlib import Path
 # Add parent directory to path for MVP core imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from elfa_client import get_ticker_narrative_snapshot
+from elfa_client import get_ticker_narrative_snapshot, calculate_weighted_mentions
 from narrative_enricher import NarrativeEnricher
 from optional.alerts_engine import AlertsEngine, AlertRule
 from optional.delta_store import DeltaStore
@@ -95,11 +95,38 @@ def check_position_narrative(
         velocity_data = store.calculate_velocity(ticker, window="1h")
         anomaly = store.detect_anomalies(ticker, window="1h", std_threshold=2.0)
         
+        # Get weighted mentions for position health scoring
+        weighted_data = calculate_weighted_mentions(snapshot)
+        weighted_mentions = weighted_data.get("weighted_mentions", enriched.total_mentions)
+        
+        # Track sentiment changes
+        sentiment = enriched.sentiment_score
+        sentiment_trend = None  # Could track historical sentiment if needed
+        
         # Determine narrative direction
         # Positive velocity = narrative strengthening
         # Negative velocity = narrative weakening
         narrative_velocity = enriched.delta_mentions if enriched else 0
         narrative_acceleration = enriched.acceleration if enriched else 0
+        
+        # Calculate position health score (0-1, higher is better)
+        position_health = 0.5  # Start neutral
+        if side == "long":
+            if narrative_velocity > 0:
+                position_health += 0.2
+            if is_bullish_sentiment := (sentiment is not None and sentiment > 0.2):
+                position_health += 0.15
+            if weighted_mentions > enriched.total_mentions * 0.8:
+                position_health += 0.1
+        elif side == "short":
+            if narrative_velocity < 0:
+                position_health += 0.2
+            if is_bearish_sentiment := (sentiment is not None and sentiment < -0.2):
+                position_health += 0.15
+            if weighted_mentions > enriched.total_mentions * 0.8:
+                position_health += 0.1
+        
+        position_health = max(0.0, min(1.0, position_health))
         
         # Check if narrative is moving against position
         warning = None
@@ -113,6 +140,13 @@ def check_position_narrative(
             elif narrative_velocity < -5:
                 warning = "📉 CAUTION: Narrative weakening"
                 severity = "medium"
+            # Check sentiment change (bullish -> bearish = warning for longs)
+            if sentiment is not None and sentiment < -0.2:
+                if not warning:
+                    warning = "📉 CAUTION: Bearish sentiment detected"
+                    severity = "medium"
+                else:
+                    warning += " + Bearish sentiment"
             elif narrative_velocity > 10 and narrative_acceleration > 5:
                 # Good: narrative strengthening
                 pass
@@ -124,6 +158,13 @@ def check_position_narrative(
             elif narrative_velocity > 5:
                 warning = "📈 CAUTION: Narrative strengthening"
                 severity = "medium"
+            # Check sentiment change (bearish -> bullish = warning for shorts)
+            if sentiment is not None and sentiment > 0.2:
+                if not warning:
+                    warning = "📈 CAUTION: Bullish sentiment detected"
+                    severity = "medium"
+                else:
+                    warning += " + Bullish sentiment"
             elif narrative_velocity < -10 and narrative_acceleration < -5:
                 # Good: narrative weakening
                 pass
@@ -132,9 +173,14 @@ def check_position_narrative(
             'ticker': ticker,
             'side': side,
             'mentions': enriched.total_mentions,
+            'weighted_mentions': weighted_mentions,
+            'organic_mentions': enriched.organic_mentions,
+            'news_mentions': enriched.news_mentions,
+            'sentiment': sentiment,
             'velocity': narrative_velocity,
             'acceleration': narrative_acceleration,
             'mindshare': enriched.mindshare_score,
+            'position_health': position_health,
             'warning': warning,
             'severity': severity,
             'anomaly': anomaly,
@@ -191,10 +237,15 @@ def monitor_loop(interval_seconds: int = 300):
                 if result:
                     # Print status
                     status_emoji = "✅" if not result['warning'] else "⚠️"
-                    print(f"{status_emoji} {ticker} ({side}): "
-                          f"{result['mentions']} mentions, "
+                    health_emoji = "🟢" if result['position_health'] > 0.7 else "🟡" if result['position_health'] > 0.4 else "🔴"
+                    print(f"{status_emoji} {health_emoji} {ticker} ({side}): "
+                          f"{result['mentions']} mentions (weighted: {result.get('weighted_mentions', result['mentions']):.1f}), "
                           f"velocity: {result['velocity']:+d}, "
-                          f"accel: {result['acceleration']:+d}")
+                          f"accel: {result['acceleration']:+d}, "
+                          f"health: {result['position_health']:.0%}")
+                    if result.get('sentiment') is not None:
+                        sentiment_label = "Bullish" if result['sentiment'] > 0.2 else "Bearish" if result['sentiment'] < -0.2 else "Neutral"
+                        print(f"  Sentiment: {result['sentiment']:+.2f} ({sentiment_label})")
                     
                     # Alert if warning
                     if result['warning']:

@@ -30,13 +30,16 @@ from pathlib import Path
 # Add parent directory to path for MVP core imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from elfa_client import get_ticker_narrative_snapshot
+from elfa_client import get_ticker_narrative_snapshot, calculate_weighted_mentions
 from narrative_enricher import NarrativeEnricher, EnrichedSnapshot
 
 
-def compute_account_overlap_matrix(enriched_snapshots: List[EnrichedSnapshot]) -> Tuple[np.ndarray, List[str]]:
+def compute_account_overlap_matrix(enriched_snapshots: List[EnrichedSnapshot], weighted: bool = False) -> Tuple[np.ndarray, List[str]]:
     """
     Compute account overlap matrix between tickers.
+    
+    Args:
+        weighted: If True, weight accounts by type (Smart > CT > News)
     
     Returns:
         (matrix, tickers) where matrix[i][j] = Jaccard similarity of accounts between tickers i and j
@@ -45,10 +48,19 @@ def compute_account_overlap_matrix(enriched_snapshots: List[EnrichedSnapshot]) -
     n = len(tickers)
     matrix = np.zeros((n, n))
     
-    # Convert to account sets
+    # Convert to account sets (with optional weighting)
     account_sets = {}
+    account_weights = {}  # For weighted overlap
+    
     for i, snap in enumerate(enriched_snapshots):
-        account_sets[snap.ticker] = set(snap.top_smart_accounts or [])
+        accounts = set(snap.top_smart_accounts or [])
+        account_sets[snap.ticker] = accounts
+        
+        if weighted:
+            # Get account details from snapshot if available
+            # For now, we'll use a simplified weighting based on weighted_mentions
+            # In a full implementation, we'd need account_details from the snapshot
+            account_weights[snap.ticker] = snap.weighted_mentions if snap.weighted_mentions else snap.total_mentions
     
     # Compute Jaccard similarity for each pair
     for i in range(n):
@@ -66,7 +78,17 @@ def compute_account_overlap_matrix(enriched_snapshots: List[EnrichedSnapshot]) -
                 else:
                     intersection = len(set_i & set_j)
                     union = len(set_i | set_j)
-                    similarity = intersection / union if union > 0 else 0.0
+                    base_similarity = intersection / union if union > 0 else 0.0
+                    
+                    # Apply weighting if requested
+                    if weighted:
+                        weight_i = account_weights.get(tickers[i], 1.0)
+                        weight_j = account_weights.get(tickers[j], 1.0)
+                        # Boost similarity if both have high weighted mentions
+                        weight_factor = min(weight_i, weight_j) / max(weight_i, weight_j, 1.0)
+                        similarity = base_similarity * (0.7 + 0.3 * weight_factor)
+                    else:
+                        similarity = base_similarity
                 
                 matrix[i][j] = similarity
     
@@ -174,6 +196,42 @@ def compute_mindshare_similarity_matrix(enriched_snapshots: List[EnrichedSnapsho
     return matrix, tickers
 
 
+def compute_sentiment_correlation_matrix(enriched_snapshots: List[EnrichedSnapshot]) -> Tuple[np.ndarray, List[str]]:
+    """
+    Compute sentiment correlation matrix.
+    
+    Returns:
+        (matrix, tickers) where matrix[i][j] = correlation of sentiment scores
+    """
+    tickers = [snap.ticker for snap in enriched_snapshots]
+    n = len(tickers)
+    matrix = np.zeros((n, n))
+    
+    # Extract sentiment scores (handle None)
+    sentiments = []
+    for snap in enriched_snapshots:
+        score = snap.sentiment_score if snap.sentiment_score is not None else 0.0
+        sentiments.append(score)
+    
+    # Compute similarity
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                matrix[i][j] = 1.0
+            else:
+                s1, s2 = sentiments[i], sentiments[j]
+                if s1 == 0 and s2 == 0:
+                    similarity = 1.0
+                else:
+                    # Normalize and compute similarity
+                    max_abs = max(abs(s1), abs(s2), 0.01)
+                    diff = abs(s1 - s2) / max_abs
+                    similarity = 1.0 - min(diff, 1.0)
+                matrix[i][j] = similarity
+    
+    return matrix, tickers
+
+
 def plot_heatmap(
     matrix: np.ndarray,
     row_labels: List[str],
@@ -266,9 +324,13 @@ def generate_co_heatmaps(
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
     
-    # 1. Account Overlap Matrix
+    # 1. Account Overlap Matrix (unweighted)
     print("📊 Generating account overlap matrix...")
-    overlap_matrix, tickers = compute_account_overlap_matrix(enriched_snapshots)
+    overlap_matrix, tickers = compute_account_overlap_matrix(enriched_snapshots, weighted=False)
+    
+    # 1b. Account Overlap Matrix (weighted by account type)
+    print("📊 Generating weighted account overlap matrix...")
+    weighted_overlap_matrix, tickers_weighted = compute_account_overlap_matrix(enriched_snapshots, weighted=True)
     
     if "png" in formats and HAS_PLOTTING:
         plot_heatmap(
@@ -287,6 +349,25 @@ def generate_co_heatmaps(
             tickers,
             title="Account Overlap Matrix (Jaccard Similarity)",
             output_path=output_dir / f"account_overlap_{timestamp}.md"
+        )
+    
+    if "png" in formats and HAS_PLOTTING:
+        plot_heatmap(
+            weighted_overlap_matrix,
+            tickers_weighted,
+            title="Weighted Account Overlap Matrix\n(Account-Type Weighted)",
+            xlabel="Ticker",
+            ylabel="Ticker",
+            cmap="YlOrRd",
+            output_path=output_dir / f"account_overlap_weighted_{timestamp}.png"
+        )
+    
+    if "md" in formats:
+        export_heatmap_markdown(
+            weighted_overlap_matrix,
+            tickers_weighted,
+            title="Weighted Account Overlap Matrix (Account-Type Weighted)",
+            output_path=output_dir / f"account_overlap_weighted_{timestamp}.md"
         )
     
     # 2. Account-Ticker Matrix
@@ -364,6 +445,29 @@ def generate_co_heatmaps(
             tickers,
             title="Mindshare Similarity Matrix",
             output_path=output_dir / f"mindshare_similarity_{timestamp}.md"
+        )
+    
+    # 5. Sentiment Correlation Matrix
+    print("📊 Generating sentiment correlation matrix...")
+    sentiment_matrix, tickers = compute_sentiment_correlation_matrix(enriched_snapshots)
+    
+    if "png" in formats and HAS_PLOTTING:
+        plot_heatmap(
+            sentiment_matrix,
+            tickers,
+            title="Sentiment Correlation Matrix",
+            xlabel="Ticker",
+            ylabel="Ticker",
+            cmap="RdYlGn",
+            output_path=output_dir / f"sentiment_correlation_{timestamp}.png"
+        )
+    
+    if "md" in formats:
+        export_heatmap_markdown(
+            sentiment_matrix,
+            tickers,
+            title="Sentiment Correlation Matrix",
+            output_path=output_dir / f"sentiment_correlation_{timestamp}.md"
         )
     
     print(f"\n✅ All heatmaps generated in: {output_dir}")

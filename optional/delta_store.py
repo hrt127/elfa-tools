@@ -45,6 +45,33 @@ class DeltaStore:
     def _init_tables(self):
         """Create tables for narrative snapshots."""
         try:
+            # Check if table exists and has new columns
+            try:
+                self.conn.execute("SELECT sentiment_score FROM narrative_snapshots LIMIT 1")
+                # Table exists with new columns
+            except:
+                # Table exists but missing new columns - add them
+                try:
+                    self.conn.execute("ALTER TABLE narrative_snapshots ADD COLUMN sentiment_score DOUBLE")
+                except:
+                    pass  # Column might already exist
+                try:
+                    self.conn.execute("ALTER TABLE narrative_snapshots ADD COLUMN organic_mentions INTEGER DEFAULT 0")
+                except:
+                    pass
+                try:
+                    self.conn.execute("ALTER TABLE narrative_snapshots ADD COLUMN news_mentions INTEGER DEFAULT 0")
+                except:
+                    pass
+                try:
+                    self.conn.execute("ALTER TABLE narrative_snapshots ADD COLUMN weighted_mentions DOUBLE")
+                except:
+                    pass
+                try:
+                    self.conn.execute("ALTER TABLE narrative_snapshots ADD COLUMN platform VARCHAR")
+                except:
+                    pass
+            
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS narrative_snapshots (
                     id INTEGER PRIMARY KEY,
@@ -55,6 +82,11 @@ class DeltaStore:
                     smart_accounts VARCHAR,
                     timestamp TIMESTAMP NOT NULL,
                     source_query VARCHAR,
+                    sentiment_score DOUBLE,
+                    organic_mentions INTEGER DEFAULT 0,
+                    news_mentions INTEGER DEFAULT 0,
+                    weighted_mentions DOUBLE,
+                    platform VARCHAR,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -96,12 +128,22 @@ class DeltaStore:
                 smart_accounts = snapshot.top_smart_accounts
                 timestamp = snapshot.timestamp
                 source_query = snapshot.source_query
+                sentiment_score = snapshot.sentiment_score
+                organic_mentions = snapshot.organic_mentions
+                news_mentions = snapshot.news_mentions
+                weighted_mentions = snapshot.weighted_mentions
+                platform = snapshot.platform
             elif isinstance(snapshot, TickerNarrativeSnapshot):
                 mentions = snapshot.total_mentions
                 mindshare = snapshot.mindshare_score
                 smart_accounts = snapshot.top_smart_accounts
                 timestamp = datetime.utcnow()  # TickerNarrativeSnapshot doesn't have timestamp
                 source_query = snapshot.source_query
+                sentiment_score = snapshot.sentiment_score
+                organic_mentions = snapshot.organic_mentions
+                news_mentions = snapshot.news_mentions
+                weighted_mentions = None  # Will need to calculate
+                platform = snapshot.platform
             else:
                 print(f"Warning: Unsupported snapshot type: {type(snapshot)}")
                 return False
@@ -118,8 +160,9 @@ class DeltaStore:
             
             self.conn.execute("""
                 INSERT INTO narrative_snapshots 
-                (id, ticker, "window", mentions, mindshare, smart_accounts, timestamp, source_query)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, ticker, "window", mentions, mindshare, smart_accounts, timestamp, source_query,
+                 sentiment_score, organic_mentions, news_mentions, weighted_mentions, platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 next_id,
                 snapshot.ticker,
@@ -128,7 +171,12 @@ class DeltaStore:
                 mindshare,
                 json.dumps(smart_accounts) if smart_accounts else None,
                 timestamp,
-                source_query or ""
+                source_query or "",
+                sentiment_score,
+                organic_mentions,
+                news_mentions,
+                weighted_mentions,
+                platform
             ))
             return True
         except Exception as e:
@@ -382,6 +430,87 @@ class DeltaStore:
             } for r in results]
         except Exception as e:
             print(f"Warning: Failed to get watchlist summary: {e}")
+            return []
+    
+    def get_sentiment_history(
+        self,
+        ticker: str,
+        window: str = "1h",
+        days: int = 7
+    ) -> List[Dict]:
+        """
+        Get sentiment history for a ticker.
+        
+        Args:
+            ticker: Ticker symbol
+            window: Time window
+            days: Number of days of history to retrieve
+            
+        Returns:
+            List of sentiment records. Never raises exceptions.
+        """
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            results = self.conn.execute("""
+                SELECT timestamp, sentiment_score, mentions, weighted_mentions
+                FROM narrative_snapshots
+                WHERE ticker = ? AND "window" = ? AND timestamp >= ? AND sentiment_score IS NOT NULL
+                ORDER BY timestamp ASC
+            """, (ticker.upper(), window, cutoff)).fetchall()
+            
+            return [{
+                'timestamp': r[0],
+                'sentiment_score': r[1],
+                'mentions': r[2],
+                'weighted_mentions': r[3]
+            } for r in results]
+        except Exception as e:
+            print(f"Warning: Failed to get sentiment history: {e}")
+            return []
+    
+    def get_organic_spikes(
+        self,
+        window: str = "1h",
+        min_organic_ratio: float = 0.7,
+        min_mentions: int = 20,
+        days: int = 7
+    ) -> List[Dict]:
+        """
+        Get organic narrative spikes (excluding news-driven).
+        
+        Args:
+            window: Time window
+            min_organic_ratio: Minimum ratio of organic to total mentions
+            min_mentions: Minimum total mentions to consider
+            days: Number of days to look back
+            
+        Returns:
+            List of organic spike records. Never raises exceptions.
+        """
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            results = self.conn.execute("""
+                SELECT ticker, timestamp, organic_mentions, news_mentions, mentions, weighted_mentions
+                FROM narrative_snapshots
+                WHERE "window" = ? 
+                  AND timestamp >= ?
+                  AND mentions >= ?
+                  AND organic_mentions > 0
+                  AND (CAST(organic_mentions AS DOUBLE) / NULLIF(mentions, 0)) >= ?
+                ORDER BY timestamp DESC, mentions DESC
+            """, (window, cutoff, min_mentions, min_organic_ratio)).fetchall()
+            
+            return [{
+                'ticker': r[0],
+                'timestamp': r[1],
+                'organic_mentions': r[2],
+                'news_mentions': r[3],
+                'total_mentions': r[4],
+                'weighted_mentions': r[5],
+                'organic_ratio': r[2] / r[4] if r[4] > 0 else 0.0
+            } for r in results]
+        except Exception as e:
+            print(f"Warning: Failed to get organic spikes: {e}")
             return []
     
     def cleanup_old_data(self, days_to_keep: int = 30) -> bool:

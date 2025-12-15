@@ -123,6 +123,14 @@ class PreTradeChecker:
             
             if side == "long":
                 # Long trade validation
+                # Check sentiment alignment (long requires bullish or neutral)
+                if is_bearish_sentiment:
+                    errors.append(f"❌ Bearish sentiment detected: {sentiment:+.2f} (long requires bullish)")
+                    confidence -= 0.25
+                elif is_bullish_sentiment:
+                    positives.append(f"✅ Bullish sentiment: {sentiment:+.2f}")
+                    confidence += 0.15
+                
                 if velocity < -10:
                     errors.append(f"❌ Narrative fading: {velocity:+d} mentions")
                     confidence -= 0.3
@@ -140,6 +148,18 @@ class PreTradeChecker:
                     positives.append(f"✅ Positive acceleration: {acceleration:+d}")
                     confidence += 0.15
                 
+                # Use weighted mentions for confidence boost
+                if weighted_mentions > enriched.total_mentions * 0.8:
+                    positives.append(f"✅ High-quality accounts: weighted {weighted_mentions:.1f} vs raw {enriched.total_mentions}")
+                    confidence += 0.1
+                
+                # Check early signal (divergence)
+                if has_early_signal:
+                    ratio = divergence.get("divergence_ratio", 1.0)
+                    platform = divergence.get("leading_platform", "unknown")
+                    positives.append(f"✅ Early signal: {platform} leading by {ratio:.1f}x")
+                    confidence += 0.1
+                
                 # Check composite signal
                 if signal:
                     if signal.composite_score < -0.3:
@@ -155,6 +175,14 @@ class PreTradeChecker:
             
             elif side == "short":
                 # Short trade validation
+                # Check sentiment alignment (short requires bearish or neutral)
+                if is_bullish_sentiment:
+                    errors.append(f"❌ Bullish sentiment detected: {sentiment:+.2f} (short requires bearish)")
+                    confidence -= 0.25
+                elif is_bearish_sentiment:
+                    positives.append(f"✅ Bearish sentiment: {sentiment:+.2f}")
+                    confidence += 0.15
+                
                 if velocity > 10:
                     errors.append(f"❌ Narrative spiking: {velocity:+d} mentions")
                     confidence -= 0.3
@@ -171,6 +199,18 @@ class PreTradeChecker:
                 elif acceleration < -5:
                     positives.append(f"✅ Negative acceleration: {acceleration:+d}")
                     confidence += 0.15
+                
+                # Use weighted mentions for confidence boost
+                if weighted_mentions > enriched.total_mentions * 0.8:
+                    positives.append(f"✅ High-quality accounts: weighted {weighted_mentions:.1f} vs raw {enriched.total_mentions}")
+                    confidence += 0.1
+                
+                # Check early signal (divergence)
+                if has_early_signal:
+                    ratio = divergence.get("divergence_ratio", 1.0)
+                    platform = divergence.get("leading_platform", "unknown")
+                    positives.append(f"✅ Early signal: {platform} leading by {ratio:.1f}x")
+                    confidence += 0.1
                 
                 # Check composite signal
                 if signal:
@@ -222,12 +262,16 @@ class PreTradeChecker:
                 'ticker': ticker,
                 'side': side,
                 'mentions': enriched.total_mentions,
+                'weighted_mentions': weighted_mentions,
+                'organic': is_organic,
+                'sentiment': sentiment,
                 'velocity': velocity,
                 'acceleration': acceleration,
                 'mindshare': enriched.mindshare_score,
                 'composite_score': signal.composite_score if signal else 0,
                 'signal_confidence': signal.confidence if signal else 0,
                 'anomaly': anomaly,
+                'divergence': divergence if has_early_signal else None,
                 'timestamp': datetime.now()
             }
         
@@ -268,10 +312,21 @@ class PreTradeChecker:
         # Print details
         print("Narrative State:")
         print(f"  Mentions: {result['mentions']}")
+        if result.get('weighted_mentions'):
+            print(f"  Weighted Mentions: {result['weighted_mentions']:.1f}")
+        if result.get('sentiment') is not None:
+            sentiment_label = "Bullish" if result['sentiment'] > 0.2 else "Bearish" if result['sentiment'] < -0.2 else "Neutral"
+            print(f"  Sentiment: {result['sentiment']:+.2f} ({sentiment_label})")
+        if result.get('organic') is not None:
+            organic_label = "✅ Organic" if result['organic'] else "⚠️ News-driven"
+            print(f"  Status: {organic_label}")
         print(f"  Velocity: {result['velocity']:+d} mentions")
         print(f"  Acceleration: {result['acceleration']:+d}")
         if result['mindshare']:
             print(f"  Mindshare: {result['mindshare']:.2f}")
+        if result.get('divergence'):
+            div = result['divergence']
+            print(f"  Early Signal: {div.get('leading_platform', 'unknown')} leading by {div.get('divergence_ratio', 1.0):.1f}x")
         
         if result['composite_score']:
             print(f"\nComposite Signal:")

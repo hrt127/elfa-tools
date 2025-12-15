@@ -89,6 +89,31 @@ def main():
         action='store_true',
         help='Skip digest generation'
     )
+    parser.add_argument(
+        '--include-trending',
+        action='store_true',
+        help='Include trending tokens discovery step'
+    )
+    parser.add_argument(
+        '--include-contracts',
+        action='store_true',
+        help='Include contract address scan step'
+    )
+    parser.add_argument(
+        '--check-divergence',
+        action='store_true',
+        help='Include cross-platform divergence check'
+    )
+    parser.add_argument(
+        '--organic-only',
+        action='store_true',
+        help='Filter to organic spikes only (exclude news-driven)'
+    )
+    parser.add_argument(
+        '--weighted',
+        action='store_true',
+        help='Sort by weighted mentions (account-type weighted)'
+    )
     
     args = parser.parse_args()
     
@@ -127,18 +152,79 @@ def main():
             '--window', args.window,
             '--export', 'morning_scan.md'
         ]
+        if args.organic_only:
+            radar_cmd.append('--organic-only')
+        if args.weighted:
+            radar_cmd.append('--weighted')
         run_command(radar_cmd, "Narrative Radar Scan")
     
-    # 2. Entry Scanner
+    # 2. Trending Tokens Discovery (optional)
+    if args.include_trending:
+        print(f"\n{'='*80}")
+        print(f"🔍 Trending Tokens Discovery")
+        print(f"{'='*80}\n")
+        try:
+            from elfa_client import get_trending_tokens
+            trending = get_trending_tokens(window=args.window, limit=20)
+            if trending:
+                print(f"📊 Top {len(trending)} Trending Tokens:\n")
+                for i, token in enumerate(trending[:10], 1):
+                    sentiment_str = f" ({token.sentiment_score:+.2f})" if token.sentiment_score else ""
+                    print(f"  {i}. {token.ticker}: {token.mentions} mentions{sentiment_str}")
+                print()
+            else:
+                print("  No trending tokens found.\n")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to get trending tokens: {e}\n")
+    
+    # 3. Contract Address Scan (optional)
+    if args.include_contracts:
+        print(f"\n{'='*80}")
+        print(f"🔍 Contract Address Scan")
+        print(f"{'='*80}\n")
+        try:
+            from elfa_client import get_trending_contracts
+            for platform in ["twitter", "telegram"]:
+                contracts = get_trending_contracts(platform=platform, window=args.window, limit=10)
+                if contracts:
+                    print(f"📊 Top {len(contracts)} Trending Contracts on {platform}:\n")
+                    for i, contract in enumerate(contracts[:5], 1):
+                        print(f"  {i}. {contract.address}: {contract.mentions} mentions")
+                        if contract.top_accounts:
+                            print(f"     Top accounts: {', '.join(contract.top_accounts[:3])}")
+                    print()
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to get trending contracts: {e}\n")
+    
+    # 4. Cross-Platform Divergence Check (optional)
+    if args.check_divergence:
+        print(f"\n{'='*80}")
+        print(f"🔍 Cross-Platform Divergence Check")
+        print(f"{'='*80}\n")
+        try:
+            from elfa_client import calculate_platform_divergence
+            for ticker in tickers[:5]:  # Limit to first 5 to avoid too many API calls
+                divergence = calculate_platform_divergence(ticker, args.window)
+                if divergence and divergence.get("early_signal"):
+                    ratio = divergence.get("divergence_ratio", 1.0)
+                    platform = divergence.get("leading_platform", "unknown")
+                    print(f"🚨 EARLY SIGNAL: {ticker}")
+                    print(f"   {platform} leading by {ratio:.1f}x")
+                    print(f"   Telegram: {divergence.get('telegram_mentions', 0)} mentions")
+                    print(f"   Twitter: {divergence.get('twitter_mentions', 0)} mentions\n")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to check divergence: {e}\n")
+    
+    # 5. Entry Scanner
     if not args.skip_scanner:
         scanner_cmd = [
-            'python', 'entry_scanner.py',
+            'python', 'optional/entry_scanner.py',
             *tickers,
             '--window', args.window
         ]
         run_command(scanner_cmd, "Entry Scanner")
     
-    # 3. Generate Digest
+    # 6. Generate Digest
     if not args.skip_digest:
         # Determine journal path
         if args.journal:
@@ -149,7 +235,7 @@ def main():
             journal_file = Path(f"journal_{datetime.now().strftime('%Y-%m-%d')}.md")
         
         digest_cmd = [
-            'python', 'narrative_digest.py',
+            'python', 'optional/narrative_digest.py',
             *tickers,
             '--window', '24h',
             '--format', 'obsidian'

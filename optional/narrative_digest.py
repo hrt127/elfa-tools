@@ -36,6 +36,9 @@ class DigestInsights:
     fastest_accelerating: List[Tuple[str, int]]  # (ticker, acceleration)
     highest_mindshare: List[Tuple[str, float]]  # (ticker, score)
     most_mentioned: List[Tuple[str, int]]  # (ticker, mentions)
+    top_weighted_movers: List[Tuple[str, float]]  # (ticker, weighted_mentions)
+    sentiment_leaders: List[Tuple[str, float]]  # (ticker, sentiment_score) - most bullish/bearish
+    organic_spikes: List[Tuple[str, int, int]]  # (ticker, organic_mentions, total_mentions)
     account_churn_leaders: List[Tuple[str, int]]  # (ticker, net_accounts)
     trending_accounts: List[str]  # Accounts appearing in multiple tickers
     total_mentions: int
@@ -46,7 +49,7 @@ class DigestInsights:
 def analyze_snapshots(snapshots: List[EnrichedSnapshot]) -> DigestInsights:
     """Extract insights from enriched snapshots."""
     if not snapshots:
-        return DigestInsights([], [], [], [], [], [], 0, 0, 0.0)
+        return DigestInsights([], [], [], [], [], [], [], [], [], 0, 0, 0.0)
     
     # Sort by various metrics
     top_movers = sorted(
@@ -56,7 +59,7 @@ def analyze_snapshots(snapshots: List[EnrichedSnapshot]) -> DigestInsights:
     )[:5]
     
     fastest_accelerating = sorted(
-        [(s.ticker, s.acceleration) for s in snapshots],
+        [(s.ticker, s.acceleration) for s in snapshots if s.acceleration is not None],
         key=lambda x: x[1],
         reverse=True
     )[:5]
@@ -69,6 +72,27 @@ def analyze_snapshots(snapshots: List[EnrichedSnapshot]) -> DigestInsights:
     
     most_mentioned = sorted(
         [(s.ticker, s.total_mentions) for s in snapshots],
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
+    
+    # Top weighted movers (account-type weighted)
+    top_weighted_movers = sorted(
+        [(s.ticker, s.weighted_mentions or s.total_mentions) for s in snapshots if s.weighted_mentions is not None],
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
+    
+    # Sentiment leaders (most bullish and bearish)
+    sentiment_leaders = sorted(
+        [(s.ticker, s.sentiment_score) for s in snapshots if s.sentiment_score is not None],
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
+    
+    # Organic spikes (high organic mentions)
+    organic_spikes = sorted(
+        [(s.ticker, s.organic_mentions, s.total_mentions) for s in snapshots if s.organic_mentions > 0],
         key=lambda x: x[1],
         reverse=True
     )[:5]
@@ -106,6 +130,9 @@ def analyze_snapshots(snapshots: List[EnrichedSnapshot]) -> DigestInsights:
         fastest_accelerating=fastest_accelerating,
         highest_mindshare=highest_mindshare,
         most_mentioned=most_mentioned,
+        top_weighted_movers=top_weighted_movers,
+        sentiment_leaders=sentiment_leaders,
+        organic_spikes=organic_spikes,
         account_churn_leaders=account_churn_leaders,
         trending_accounts=trending_accounts,
         total_mentions=total_mentions,
@@ -159,6 +186,23 @@ type: digest
     for ticker, mentions in insights.most_mentioned:
         content += f"- **[[{ticker}]]**: {mentions:,} mentions\n"
     
+    if insights.top_weighted_movers:
+        content += "\n## ⚖️ Top Weighted Movers (Account-Type Weighted)\n\n"
+        for ticker, weighted in insights.top_weighted_movers:
+            content += f"- **[[{ticker}]]**: {weighted:.1f} weighted mentions\n"
+    
+    if insights.sentiment_leaders:
+        content += "\n## 📊 Sentiment Leaders\n\n"
+        for ticker, sentiment in insights.sentiment_leaders:
+            sentiment_label = "🚀 Bullish" if sentiment > 0.2 else "📉 Bearish" if sentiment < -0.2 else "➡️ Neutral"
+            content += f"- **[[{ticker}]]**: {sentiment:+.2f} ({sentiment_label})\n"
+    
+    if insights.organic_spikes:
+        content += "\n## ✅ Organic Spikes (News-Driven Excluded)\n\n"
+        for ticker, organic, total in insights.organic_spikes:
+            news = total - organic
+            content += f"- **[[{ticker}]]**: {organic} organic / {total} total ({news} news)\n"
+    
     if insights.trending_accounts:
         content += "\n## 🔥 Trending Accounts\n\n"
         for account in insights.trending_accounts:
@@ -169,9 +213,16 @@ type: digest
         content += f"""### {snap.ticker}
 
 - **Mentions:** {snap.total_mentions:,}
-- **Velocity:** {format_number(snap.delta_mentions)}
-- **Acceleration:** {format_number(snap.acceleration)}
 """
+        if snap.weighted_mentions is not None:
+            content += f"- **Weighted Mentions:** {snap.weighted_mentions:.1f}\n"
+        if snap.sentiment_score is not None:
+            sentiment_label = "Bullish" if snap.sentiment_score > 0.2 else "Bearish" if snap.sentiment_score < -0.2 else "Neutral"
+            content += f"- **Sentiment:** {snap.sentiment_score:+.2f} ({sentiment_label})\n"
+        if snap.organic_mentions > 0 or snap.news_mentions > 0:
+            content += f"- **Organic:** {snap.organic_mentions}, **News:** {snap.news_mentions}\n"
+        content += f"- **Velocity:** {format_number(snap.delta_mentions)}\n"
+        content += f"- **Acceleration:** {format_number(snap.acceleration) if snap.acceleration is not None else 'N/A'}\n"
         if snap.mindshare_score:
             content += f"- **Mindshare:** {snap.mindshare_score:.2f}\n"
         
@@ -212,6 +263,22 @@ def generate_telegram_digest(snapshots: List[EnrichedSnapshot], insights: Digest
     for ticker, score in insights.highest_mindshare[:3]:
         content += f"• {ticker}: {score:.2f}\n"
     
+    if insights.top_weighted_movers:
+        content += "\n⚖️ *Top Weighted Movers*\n"
+        for ticker, weighted in insights.top_weighted_movers[:3]:
+            content += f"• {ticker}: {weighted:.1f}\n"
+    
+    if insights.sentiment_leaders:
+        content += "\n📊 *Sentiment Leaders*\n"
+        for ticker, sentiment in insights.sentiment_leaders[:3]:
+            emoji = "🚀" if sentiment > 0.2 else "📉" if sentiment < -0.2 else "➡️"
+            content += f"• {ticker}: {sentiment:+.2f} {emoji}\n"
+    
+    if insights.organic_spikes:
+        content += "\n✅ *Organic Spikes*\n"
+        for ticker, organic, total in insights.organic_spikes[:3]:
+            content += f"• {ticker}: {organic}/{total} organic\n"
+    
     if insights.trending_accounts:
         content += "\n🔥 *Trending Accounts*\n"
         for account in insights.trending_accounts[:5]:
@@ -247,6 +314,22 @@ def generate_discord_digest(snapshots: List[EnrichedSnapshot], insights: DigestI
     content += "\n## 💎 Highest Mindshare\n"
     for ticker, score in insights.highest_mindshare[:5]:
         content += f"💎 **{ticker}**: `{score:.2f}`\n"
+    
+    if insights.top_weighted_movers:
+        content += "\n## ⚖️ Top Weighted Movers\n"
+        for ticker, weighted in insights.top_weighted_movers[:5]:
+            content += f"⚖️ **{ticker}**: `{weighted:.1f}` weighted\n"
+    
+    if insights.sentiment_leaders:
+        content += "\n## 📊 Sentiment Leaders\n"
+        for ticker, sentiment in insights.sentiment_leaders[:5]:
+            emoji = "🚀" if sentiment > 0.2 else "📉" if sentiment < -0.2 else "➡️"
+            content += f"{emoji} **{ticker}**: `{sentiment:+.2f}`\n"
+    
+    if insights.organic_spikes:
+        content += "\n## ✅ Organic Spikes\n"
+        for ticker, organic, total in insights.organic_spikes[:5]:
+            content += f"✅ **{ticker}**: `{organic}/{total}` organic\n"
     
     if insights.trending_accounts:
         content += "\n## 🔥 Trending Accounts\n"
