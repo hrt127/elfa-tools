@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, TypeVar
 from collections import defaultdict
 import requests  # pyright: ignore[reportMissingModuleSource]
 
@@ -23,6 +23,9 @@ except ImportError:
 _rate_limit_tracker: Dict[str, List[float]] = defaultdict(list)  # endpoint -> list of request timestamps
 _cache: Dict[str, Tuple[Any, float]] = {}  # cache_key -> (result, expiry_time)
 _cache_ttl = 300  # 5 minutes default cache TTL
+
+# Type variable for generic cache functions
+T = TypeVar('T')
 
 
 @dataclass
@@ -50,9 +53,12 @@ class TickerNarrativeSnapshot:
     organic_mentions: int = 0  # Mentions excluding news
 
 
-def _get_cache_key(ticker: str, window: str) -> str:
-    """Generate a cache key for the given ticker and window."""
-    return f"ticker:{ticker.upper()}:window:{window}"
+def _get_cache_key(ticker: str, window: str, source: Optional[str] = None) -> str:
+    """Generate a cache key for the given ticker, window, and optional source."""
+    key = f"ticker:{ticker.upper()}:window:{window}"
+    if source:
+        key += f":source:{source.lower()}"
+    return key
 
 
 def _is_rate_limited(endpoint: str, max_requests: int = 60, window_seconds: int = 60) -> bool:
@@ -85,8 +91,12 @@ def _is_rate_limited(endpoint: str, max_requests: int = 60, window_seconds: int 
     return False
 
 
-def _get_cached_result(cache_key: str) -> Optional[TickerNarrativeSnapshot]:
-    """Get a cached result if it exists and hasn't expired."""
+def _get_cached_result(cache_key: str) -> Optional[Any]:
+    """Get a cached result if it exists and hasn't expired.
+    
+    Returns:
+        Cached result of any type, or None if not found or expired.
+    """
     global _cache
     if cache_key in _cache:
         result, expiry_time = _cache[cache_key]
@@ -98,8 +108,14 @@ def _get_cached_result(cache_key: str) -> Optional[TickerNarrativeSnapshot]:
     return None
 
 
-def _cache_result(cache_key: str, result: TickerNarrativeSnapshot, ttl: int = None) -> None:
-    """Cache a result with the given TTL."""
+def _cache_result(cache_key: str, result: Any, ttl: int = None) -> None:
+    """Cache a result with the given TTL.
+    
+    Args:
+        cache_key: Unique key for the cache entry
+        result: Result of any type to cache
+        ttl: Time to live in seconds (defaults to _cache_ttl)
+    """
     global _cache, _cache_ttl
     if ttl is None:
         ttl = _cache_ttl
@@ -129,7 +145,7 @@ def get_ticker_narrative_snapshot(
     try:
         # Check cache first
         if use_cache:
-            cache_key = _get_cache_key(ticker, window)
+            cache_key = _get_cache_key(ticker, window, source)
             cached_result = _get_cached_result(cache_key)
             if cached_result is not None:
                 return cached_result
