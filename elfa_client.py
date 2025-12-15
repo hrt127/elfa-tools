@@ -25,7 +25,7 @@ def _get_session() -> requests.Session:
 
 # Try to load .env file if python-dotenv is available
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # pyright: ignore[reportMissingImports]
     # Load .env from project root
     env_path = Path(__file__).parent / '.env'
     if env_path.exists():
@@ -274,13 +274,15 @@ def get_ticker_narrative_snapshot(
         }
         
         # Add source parameter if specified (for platform filtering)
+        normalized_source = None
         if source:
-            params["source"] = str(source).strip().lower()
+            normalized_source = str(source).strip().lower()
+            params["source"] = normalized_source
 
-        # Build source_query for audit trail
+        # Build source_query for audit trail (use normalized source to match what's actually sent)
         source_query = f"GET {url}?ticker={ticker}&timeWindow={window}&page=0&pageSize=10"
-        if source:
-            source_query += f"&source={source}"
+        if normalized_source:
+            source_query += f"&source={normalized_source}"
 
         # Use the retry-enabled request helper
         response = _make_api_request(url, headers, params, max_retries=3, retry_delay=2.0, timeout=15)

@@ -232,7 +232,15 @@ class AlertsEngine:
                     organic_mentions = data.organic_mentions
                     news_mentions = data.news_mentions
                 elif isinstance(data, EnrichedSnapshot):
-                    is_organic = organic_mentions > 0 or news_mentions == 0
+                    # Determine if spike is truly organic by checking that organic mentions
+                    # significantly outweigh news mentions (similar to is_organic_narrative_spike logic)
+                    total_mentions = data.total_mentions
+                    if total_mentions == 0:
+                        is_organic = False
+                    else:
+                        news_ratio = news_mentions / total_mentions
+                        # Consider organic if news ratio is less than 30% (same threshold as is_organic_narrative_spike)
+                        is_organic = news_ratio < 0.3 and organic_mentions > 0
                 
                 # Calculate news_ratio for alert templates
                 total_mentions = data.total_mentions
