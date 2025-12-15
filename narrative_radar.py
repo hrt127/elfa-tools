@@ -100,9 +100,16 @@ def display_cli_radar(enriched_snapshots: List[EnrichedSnapshot], window: str, w
     if organic_only:
         filtered_snapshots = []
         for snap in enriched_snapshots:
-            analysis = is_organic_narrative_spike(snap.ticker, window, min_mentions=1)
-            if analysis.get("is_organic", True):
+            # Use organic_mentions field if available, otherwise check via API
+            if snap.organic_mentions > 0 and snap.news_mentions == 0:
                 filtered_snapshots.append(snap)
+            elif snap.organic_mentions > snap.news_mentions * 2:  # At least 2x organic vs news
+                filtered_snapshots.append(snap)
+            else:
+                # Fallback: check via API if fields not populated
+                analysis = is_organic_narrative_spike(snap.ticker, window, min_mentions=1, use_cache=True)
+                if analysis and analysis.get("is_organic", False):
+                    filtered_snapshots.append(snap)
         enriched_snapshots = filtered_snapshots
         if not enriched_snapshots:
             print("No organic narrative spikes found.")
@@ -194,9 +201,16 @@ def export_markdown(enriched_snapshots: List[EnrichedSnapshot], window: str, out
     if organic_only:
         filtered_snapshots = []
         for snap in enriched_snapshots:
-            analysis = is_organic_narrative_spike(snap.ticker, window, min_mentions=1)
-            if analysis.get("is_organic", True):
+            # Use organic_mentions field if available
+            if snap.organic_mentions > 0 and snap.news_mentions == 0:
                 filtered_snapshots.append(snap)
+            elif snap.organic_mentions > snap.news_mentions * 2:  # At least 2x organic vs news
+                filtered_snapshots.append(snap)
+            else:
+                # Fallback: check via API if fields not populated
+                analysis = is_organic_narrative_spike(snap.ticker, window, min_mentions=1, use_cache=True)
+                if analysis and analysis.get("is_organic", False):
+                    filtered_snapshots.append(snap)
         enriched_snapshots = filtered_snapshots
     
     with open(output_path, 'w', encoding='utf-8') as f:

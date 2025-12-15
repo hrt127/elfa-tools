@@ -228,16 +228,19 @@ class SignalComposer:
                 weighted_mentions = weighted_data.get("weighted_mentions")
             
             # Check organic status
-            is_organic = True
             organic_mentions = getattr(data, 'organic_mentions', 0)
             news_mentions = getattr(data, 'news_mentions', 0)
-            if isinstance(data, TickerNarrativeSnapshot):
-                analysis = is_organic_narrative_spike(data.ticker, data.window, min_mentions=1)
-                is_organic = analysis.get("is_organic", True)
-                organic_mentions = data.organic_mentions
-                news_mentions = data.news_mentions
-            elif isinstance(data, EnrichedSnapshot):
-                is_organic = organic_mentions > 0 or news_mentions == 0
+            
+            # Determine if organic: organic mentions exist and news ratio is low
+            if organic_mentions > 0 and news_mentions == 0:
+                is_organic = True
+            elif organic_mentions > news_mentions * 2:  # At least 2x organic vs news
+                is_organic = True
+            elif news_mentions > organic_mentions * 2:  # Mostly news-driven
+                is_organic = False
+            else:
+                # Default to organic if we can't determine
+                is_organic = True
             
             # Convert snapshot to dict format
             return {
