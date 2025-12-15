@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import existing data structures
-from elfa_client import TickerNarrativeSnapshot
+from elfa_client import TickerNarrativeSnapshot, calculate_weighted_mentions, is_organic_narrative_spike
 from narrative_enricher import EnrichedSnapshot
 
 class SignalStrength(Enum):
@@ -219,11 +219,36 @@ class SignalComposer:
             return None
         
         if isinstance(data, (TickerNarrativeSnapshot, EnrichedSnapshot)):
+            # Calculate weighted mentions if not already present
+            weighted_mentions = None
+            if isinstance(data, EnrichedSnapshot) and data.weighted_mentions is not None:
+                weighted_mentions = data.weighted_mentions
+            elif isinstance(data, TickerNarrativeSnapshot):
+                weighted_data = calculate_weighted_mentions(data)
+                weighted_mentions = weighted_data.get("weighted_mentions")
+            
+            # Check organic status
+            is_organic = True
+            organic_mentions = getattr(data, 'organic_mentions', 0)
+            news_mentions = getattr(data, 'news_mentions', 0)
+            if isinstance(data, TickerNarrativeSnapshot):
+                analysis = is_organic_narrative_spike(data.ticker, data.window, min_mentions=1)
+                is_organic = analysis.get("is_organic", True)
+                organic_mentions = data.organic_mentions
+                news_mentions = data.news_mentions
+            elif isinstance(data, EnrichedSnapshot):
+                is_organic = organic_mentions > 0 or news_mentions == 0
+            
             # Convert snapshot to dict format
             return {
                 'mentions': data.total_mentions,
+                'weighted_mentions': weighted_mentions,
+                'organic_mentions': organic_mentions,
+                'news_mentions': news_mentions,
+                'is_organic': is_organic,
                 'mindshare': data.mindshare_score,
                 'smart_accounts': data.top_smart_accounts,
+                'sentiment_score': getattr(data, 'sentiment_score', None),
                 'mentions_velocity': getattr(data, 'delta_mentions', 0) if isinstance(data, EnrichedSnapshot) else 0,
                 'acceleration': getattr(data, 'acceleration', None) if isinstance(data, EnrichedSnapshot) else None
             }
@@ -237,29 +262,52 @@ class SignalComposer:
         """
         Score narrative strength from -1 (bearish) to 1 (bullish).
         
-        Considers: mentions, mindshare, velocity, smart accounts
+        Considers: weighted mentions, sentiment, organic status, mindshare, velocity, smart accounts
         
         Never raises exceptions.
         """
         try:
             score = 0.0
             
-            # Mindshare component (0 to 0.4)
+            # Sentiment component (-0.4 to 0.4) - most important for direction
+            sentiment = data.get('sentiment_score')
+            if sentiment is not None:
+                score += max(min(sentiment * 0.4, 0.4), -0.4)
+            
+            # Weighted mentions component (0 to 0.3) - use weighted if available
+            weighted = data.get('weighted_mentions')
+            mentions = data.get('mentions', 0)
+            if weighted is not None and weighted > 0:
+                # Normalize weighted mentions (assumes typical range 0-100)
+                score += min(weighted / 100 * 0.3, 0.3)
+            elif mentions > 0:
+                # Fallback to raw mentions if weighted not available
+                score += min(mentions / 150 * 0.3, 0.3)
+            
+            # Organic boost (0 to 0.15) - organic spikes are more predictive
+            is_organic = data.get('is_organic', True)
+            organic_mentions = data.get('organic_mentions', 0)
+            if is_organic and organic_mentions > 0:
+                # Boost for organic activity
+                organic_ratio = organic_mentions / max(mentions, 1)
+                score += organic_ratio * 0.15
+            
+            # Mindshare component (0 to 0.2)
             mindshare = data.get('mindshare', 0) or 0
             if mindshare:
-                score += min(mindshare * 4, 0.4)  # Cap at 0.4
+                score += min(mindshare * 4, 0.2)  # Reduced weight
             
-            # Mentions velocity component (-0.3 to 0.3)
+            # Mentions velocity component (-0.2 to 0.2)
             velocity = data.get('mentions_velocity', 0) or 0
             if velocity:
                 # Normalize velocity (assumes typical range of -50 to +50)
-                score += max(min(velocity / 20, 0.3), -0.3)
+                score += max(min(velocity / 25, 0.2), -0.2)
             
-            # Smart accounts component (0 to 0.3)
+            # Smart accounts component (0 to 0.15)
             smart_accounts = data.get('smart_accounts', [])
             if smart_accounts:
                 smart_count = len(smart_accounts) if isinstance(smart_accounts, list) else 0
-                score += min(smart_count * 0.1, 0.3)
+                score += min(smart_count * 0.05, 0.15)
             
             return max(min(score, 1.0), -1.0)
         except Exception as e:
@@ -377,12 +425,24 @@ class SignalComposer:
             smart_accounts = data.get('smart_accounts', [])
             smart_count = len(smart_accounts) if isinstance(smart_accounts, list) else 0
             
-            return {
+            evidence = {
                 'Mentions': data.get('mentions', 0),
                 'Mindshare': f"{data.get('mindshare', 0):.2f}" if data.get('mindshare') else 'N/A',
                 'Smart accounts': smart_count,
                 'Velocity': data.get('mentions_velocity', 0) or 0
             }
+            
+            # Add new fields if available
+            if data.get('weighted_mentions') is not None:
+                evidence['Weighted mentions'] = f"{data['weighted_mentions']:.1f}"
+            if data.get('sentiment_score') is not None:
+                sentiment_label = "Bullish" if data['sentiment_score'] > 0.2 else "Bearish" if data['sentiment_score'] < -0.2 else "Neutral"
+                evidence['Sentiment'] = f"{data['sentiment_score']:+.2f} ({sentiment_label})"
+            if data.get('organic_mentions', 0) > 0 or data.get('news_mentions', 0) > 0:
+                evidence['Organic'] = f"{data.get('organic_mentions', 0)}"
+                evidence['News'] = f"{data.get('news_mentions', 0)}"
+            
+            return evidence
         except Exception as e:
             print(f"Warning: Failed to extract narrative evidence: {e}")
             return {}
@@ -425,6 +485,23 @@ class SignalComposer:
             warnings.append("Narrative bullish but market bearish")
         if onchain_score > 0.3 and market_score < -0.3:
             warnings.append("On-chain bullish but price weak")
+        
+        # Sentiment-based warnings
+        if narrative_data:
+            sentiment = narrative_data.get('sentiment_score')
+            if sentiment is not None:
+                if sentiment < -0.3 and narrative_score > 0:
+                    warnings.append("Bearish narrative spike detected (negative sentiment)")
+                elif sentiment > 0.3 and narrative_score < 0:
+                    warnings.append("Bullish narrative spike detected (positive sentiment)")
+            
+            # News-driven spike warning
+            is_organic = narrative_data.get('is_organic', True)
+            news_mentions = narrative_data.get('news_mentions', 0)
+            if not is_organic and news_mentions > 0:
+                news_ratio = news_mentions / max(narrative_data.get('mentions', 1), 1)
+                if news_ratio > 0.5:
+                    warnings.append(f"News-driven spike ({news_ratio:.0%} news mentions)")
         
         # Extreme conditions
         if market_data:

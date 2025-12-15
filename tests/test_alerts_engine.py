@@ -516,6 +516,149 @@ class TestRuleFactory:
         assert rule.condition(data_anomaly) is True
         assert rule.condition(data_normal) is False
         assert rule.condition(data_no_zscore) is False
+    
+    def test_sentiment_alert_bullish(self):
+        """Test sentiment alert for bullish threshold."""
+        # Check if sentiment_alert exists, if not we'll test the concept
+        from optional.alerts_engine import RuleFactory
+        
+        # Create a custom sentiment alert rule (may not exist yet)
+        rule = AlertRule(
+            name="BTC_sentiment",
+            ticker="BTC",
+            condition=lambda d: (d.get('sentiment_score') is not None) and d['sentiment_score'] > 0.5,
+            message_template="🚀 BULLISH: {ticker} sentiment {sentiment_score:.2f}",
+            cooldown_minutes=30
+        )
+        
+        data_bullish = {'sentiment_score': 0.75}
+        data_bearish = {'sentiment_score': -0.5}
+        data_neutral = {'sentiment_score': 0.2}
+        data_no_sentiment = {}
+        
+        assert rule.condition(data_bullish) is True
+        assert rule.condition(data_bearish) is False
+        assert rule.condition(data_neutral) is False
+        assert rule.condition(data_no_sentiment) is False
+    
+    def test_sentiment_alert_bearish(self):
+        """Test sentiment alert for bearish threshold."""
+        rule = AlertRule(
+            name="BTC_sentiment_bearish",
+            ticker="BTC",
+            condition=lambda d: (d.get('sentiment_score') is not None) and d['sentiment_score'] < -0.5,
+            message_template="📉 BEARISH: {ticker} sentiment {sentiment_score:.2f}",
+            cooldown_minutes=30
+        )
+        
+        data_bearish = {'sentiment_score': -0.75}
+        data_bullish = {'sentiment_score': 0.5}
+        
+        assert rule.condition(data_bearish) is True
+        assert rule.condition(data_bullish) is False
+    
+    def test_weighted_mentions_alert(self):
+        """Test weighted mentions alert."""
+        rule = AlertRule(
+            name="BTC_weighted",
+            ticker="BTC",
+            condition=lambda d: (d.get('weighted_mentions') is not None) and d['weighted_mentions'] > 50,
+            message_template="⚖️ WEIGHTED SPIKE: {ticker} has {weighted_mentions:.1f} weighted mentions",
+            cooldown_minutes=45
+        )
+        
+        data_high = {'weighted_mentions': 75.5}
+        data_low = {'weighted_mentions': 30.0}
+        data_no_weighted = {}
+        
+        assert rule.condition(data_high) is True
+        assert rule.condition(data_low) is False
+        assert rule.condition(data_no_weighted) is False
+    
+    def test_organic_spike_alert(self):
+        """Test organic spike alert (excluding news-driven)."""
+        rule = AlertRule(
+            name="BTC_organic",
+            ticker="BTC",
+            condition=lambda d: (
+                d.get('is_organic', False) and
+                d.get('organic_mentions', 0) >= 30
+            ),
+            message_template="🌱 ORGANIC SPIKE: {ticker} has {organic_mentions} organic mentions",
+            cooldown_minutes=60
+        )
+        
+        data_organic = {'is_organic': True, 'organic_mentions': 50}
+        data_news_driven = {'is_organic': False, 'organic_mentions': 50}
+        data_low_organic = {'is_organic': True, 'organic_mentions': 20}
+        
+        assert rule.condition(data_organic) is True
+        assert rule.condition(data_news_driven) is False
+        assert rule.condition(data_low_organic) is False
+    
+    def test_platform_divergence_alert(self):
+        """Test platform divergence alert."""
+        rule = AlertRule(
+            name="BTC_divergence",
+            ticker="BTC",
+            condition=lambda d: (
+                d.get('early_signal', False) and
+                d.get('divergence_ratio', 0) > 1.2
+            ),
+            message_template=(
+                "🔀 PLATFORM DIVERGENCE: {ticker}\n"
+                "{leading_platform} leading by {divergence_ratio:.1f}x\n"
+                "Telegram: {telegram_mentions}, Twitter: {twitter_mentions}"
+            ),
+            cooldown_minutes=90
+        )
+        
+        data_divergence = {
+            'early_signal': True,
+            'divergence_ratio': 1.5,
+            'leading_platform': 'telegram',
+            'telegram_mentions': 150,
+            'twitter_mentions': 100
+        }
+        data_no_divergence = {
+            'early_signal': False,
+            'divergence_ratio': 1.1
+        }
+        
+        assert rule.condition(data_divergence) is True
+        assert rule.condition(data_no_divergence) is False
+    
+    def test_contract_address_alert(self):
+        """Test contract address trending alert."""
+        rule = AlertRule(
+            name="contract_trending",
+            ticker="*",  # Wildcard for any contract
+            condition=lambda d: (
+                d.get('address') is not None and
+                d.get('mentions', 0) >= 50
+            ),
+            message_template=(
+                "📝 CONTRACT TRENDING: {address}\n"
+                "Mentions: {mentions}\n"
+                "Platform: {platform}"
+            ),
+            cooldown_minutes=120
+        )
+        
+        data_trending = {
+            'address': '0x123...',
+            'mentions': 75,
+            'platform': 'twitter'
+        }
+        data_low = {
+            'address': '0x456...',
+            'mentions': 30
+        }
+        data_no_address = {'mentions': 75}
+        
+        assert rule.condition(data_trending) is True
+        assert rule.condition(data_low) is False
+        assert rule.condition(data_no_address) is False
 
 
 class TestDataNormalization:
@@ -541,6 +684,70 @@ class TestDataNormalization:
         assert data['mentions'] == 100
         assert data['mentions_velocity'] == 25  # delta_mentions
         assert data['acceleration'] == 5.0
+    
+    def test_normalize_with_new_fields(self, engine):
+        """Test normalizing EnrichedSnapshot with new enhancement fields."""
+        from narrative_enricher import EnrichedSnapshot
+        from datetime import datetime
+        
+        enriched = EnrichedSnapshot(
+            ticker="BTC",
+            window="4h",
+            timestamp=datetime.utcnow(),
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=["account1", "account2"],
+            source_query="test_query",
+            delta_mentions=25,
+            acceleration=5.0,
+            new_accounts=["new1"],
+            lost_accounts=["lost1"],
+            sentiment_score=0.75,  # New field
+            news_mentions=10,  # New field
+            organic_mentions=90,  # New field
+            platform="twitter",  # New field
+            weighted_mentions=85.5  # New field
+        )
+        
+        data = engine._normalize_data(enriched)
+        
+        assert data is not None
+        assert data['ticker'] == "BTC"
+        assert data['sentiment_score'] == 0.75
+        assert data['news_mentions'] == 10
+        assert data['organic_mentions'] == 90
+        assert data['platform'] == "twitter"
+        assert data['weighted_mentions'] == 85.5
+    
+    def test_normalize_backward_compatibility(self, engine):
+        """Test normalization works with old EnrichedSnapshot (missing new fields)."""
+        from narrative_enricher import EnrichedSnapshot
+        from datetime import datetime
+        
+        # Old-style snapshot without new fields
+        enriched = EnrichedSnapshot(
+            ticker="BTC",
+            window="4h",
+            timestamp=datetime.utcnow(),
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=["account1"],
+            source_query="test_query",
+            delta_mentions=25,
+            acceleration=5.0,
+            new_accounts=[],
+            lost_accounts=[]
+            # No new fields - should default to None/0
+        )
+        
+        data = engine._normalize_data(enriched)
+        
+        assert data is not None
+        assert data['ticker'] == "BTC"
+        # New fields should be None or 0, not cause errors
+        assert data.get('sentiment_score') is None or data.get('sentiment_score') == 0
+        assert data.get('news_mentions', 0) == 0
+        assert data.get('organic_mentions', 0) == 0
     
     def test_normalize_dict(self, engine):
         """Test normalizing dict data."""

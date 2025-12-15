@@ -250,6 +250,14 @@ def export_markdown(enriched_snapshots: List[EnrichedSnapshot], window: str, out
         for snap in sorted_snapshots:
             f.write(f"### {snap.ticker}\n\n")
             f.write(f"- **Total Mentions:** {snap.total_mentions}\n")
+            if snap.weighted_mentions is not None:
+                f.write(f"- **Weighted Mentions:** {snap.weighted_mentions:.1f}\n")
+            if snap.sentiment_score is not None:
+                sentiment_label = "Bullish" if snap.sentiment_score > 0.2 else "Bearish" if snap.sentiment_score < -0.2 else "Neutral"
+                f.write(f"- **Sentiment:** {snap.sentiment_score:+.2f} ({sentiment_label})\n")
+            if snap.organic_mentions > 0 or snap.news_mentions > 0:
+                f.write(f"- **Organic Mentions:** {snap.organic_mentions}\n")
+                f.write(f"- **News Mentions:** {snap.news_mentions}\n")
             f.write(f"- **Velocity (Δ):** {format_number(snap.delta_mentions)}\n")
             f.write(f"- **Acceleration:** {format_number(snap.acceleration) if snap.acceleration is not None else 'N/A'}\n")
             if snap.mindshare_score:
@@ -330,6 +338,18 @@ Examples:
         help='Disable caching for fresh data'
     )
     
+    parser.add_argument(
+        '--organic-only',
+        action='store_true',
+        help='Filter to show only organic narrative spikes (exclude news-driven)'
+    )
+    
+    parser.add_argument(
+        '--weighted',
+        action='store_true',
+        help='Sort by weighted mentions instead of raw mentions'
+    )
+    
     args = parser.parse_args()
     
     # Check for API key upfront with clear error message
@@ -384,11 +404,11 @@ Examples:
         sys.exit(1)
     
     # Display CLI radar
-    display_cli_radar(enriched_snapshots, args.window)
+    display_cli_radar(enriched_snapshots, args.window, weighted=args.weighted, organic_only=args.organic_only)
     
     # Export to markdown if requested
     if args.export:
-        export_markdown(enriched_snapshots, args.window, args.export)
+        export_markdown(enriched_snapshots, args.window, args.export, weighted=args.weighted, organic_only=args.organic_only)
     
     # Exit with error if any failures
     if failed_tickers:

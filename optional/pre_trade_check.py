@@ -24,7 +24,7 @@ from pathlib import Path
 # Add parent directory to path for MVP core imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from elfa_client import get_ticker_narrative_snapshot
+from elfa_client import get_ticker_narrative_snapshot, is_organic_narrative_spike, calculate_weighted_mentions, calculate_platform_divergence
 from narrative_enricher import NarrativeEnricher
 from optional.delta_store import DeltaStore
 from optional.signal_composer import SignalComposer
@@ -89,11 +89,33 @@ class PreTradeChecker:
                 } if market_data else None
             )
             
+            # Check organic status
+            organic_analysis = is_organic_narrative_spike(ticker, window, min_mentions=1)
+            is_organic = organic_analysis.get("is_organic", True)
+            
+            # Get weighted mentions for confidence calculation
+            weighted_data = calculate_weighted_mentions(snapshot)
+            weighted_mentions = weighted_data.get("weighted_mentions", enriched.total_mentions)
+            
+            # Check sentiment alignment
+            sentiment = enriched.sentiment_score
+            is_bullish_sentiment = sentiment is not None and sentiment > 0.2
+            is_bearish_sentiment = sentiment is not None and sentiment < -0.2
+            
+            # Check cross-platform divergence
+            divergence = calculate_platform_divergence(ticker, window)
+            has_early_signal = divergence and divergence.get("early_signal", False)
+            
             # Validate trade
             warnings = []
             errors = []
             positives = []
             confidence = 0.5  # Start neutral
+            
+            # Check organic status (block news-driven spikes)
+            if not is_organic:
+                errors.append(f"❌ News-driven spike detected (not organic)")
+                confidence -= 0.3
             
             # Check narrative velocity
             velocity = enriched.delta_mentions

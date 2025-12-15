@@ -24,7 +24,7 @@ from pathlib import Path
 # Add parent directory to path for MVP core imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from elfa_client import get_ticker_narrative_snapshot
+from elfa_client import get_ticker_narrative_snapshot, is_organic_narrative_spike, calculate_weighted_mentions, calculate_platform_divergence
 from narrative_enricher import NarrativeEnricher
 from optional.delta_store import DeltaStore
 from optional.signal_composer import SignalComposer
@@ -74,23 +74,44 @@ class EntryScanner:
                 } if market_data else None
             )
             
+            # Check organic status and sentiment
+            organic_analysis = is_organic_narrative_spike(ticker, window, min_mentions=1)
+            is_organic = organic_analysis.get("is_organic", True)
+            
+            # Get weighted mentions for conviction calculation
+            weighted_data = calculate_weighted_mentions(snapshot)
+            weighted_mentions = weighted_data.get("weighted_mentions", enriched.total_mentions)
+            
+            # Check sentiment alignment
+            sentiment = enriched.sentiment_score
+            is_bullish_sentiment = sentiment is not None and sentiment > 0.2
+            is_bearish_sentiment = sentiment is not None and sentiment < -0.2
+            
+            # Check cross-platform divergence
+            divergence = calculate_platform_divergence(ticker, window)
+            has_early_signal = divergence and divergence.get("early_signal", False)
+            
             # Analyze for entry setups
             setups = []
             conviction = 0.0
             reasoning = []
             
-            # 1. Narrative Spike (continuation play)
-            if enriched.delta_mentions > 20 and enriched.acceleration is not None and enriched.acceleration > 10:
+            # 1. Narrative Spike (continuation play) - only if organic
+            if is_organic and enriched.delta_mentions > 20 and enriched.acceleration is not None and enriched.acceleration > 10:
                 setups.append("spike")
                 conviction += 0.3
-                reasoning.append(f"🚀 Narrative spike: +{enriched.delta_mentions} mentions, "
-                               f"accel +{enriched.acceleration}" if enriched.acceleration is not None else "accel N/A")
+                reasoning.append(f"🚀 Organic narrative spike: +{enriched.delta_mentions} mentions, "
+                               f"accel +{enriched.acceleration}")
+            elif not is_organic and enriched.delta_mentions > 20:
+                reasoning.append(f"⚠️ News-driven spike detected (skipping)")
             
-            # 2. Strong Velocity (momentum play)
+            # 2. Strong Velocity (momentum play) - use weighted mentions
             if velocity_data and velocity_data.get('mentions_velocity', 0) > 15:
-                setups.append("momentum")
-                conviction += 0.25
-                reasoning.append(f"📈 Strong momentum: {velocity_data['mentions_velocity']:.1f} mentions/snapshot")
+                # Use weighted mentions threshold if available
+                if weighted_mentions > enriched.total_mentions * 0.8:  # High quality accounts
+                    setups.append("momentum")
+                    conviction += 0.25
+                    reasoning.append(f"📈 Strong momentum: {velocity_data['mentions_velocity']:.1f} mentions/snapshot (weighted: {weighted_mentions:.1f})")
             
             # 3. Anomaly (mean reversion play)
             if anomaly and abs(anomaly['z_score']) >= 2.5:
@@ -105,25 +126,54 @@ class EntryScanner:
                 conviction += 0.15
                 reasoning.append(f"💡 Smart money: {len(enriched.new_accounts)} new accounts")
             
-            # 5. High Confidence Composite Signal
+            # 5. Cross-platform divergence (early signal)
+            if has_early_signal:
+                setups.append("divergence")
+                conviction += 0.2
+                ratio = divergence.get("divergence_ratio", 1.0)
+                platform = divergence.get("leading_platform", "unknown")
+                reasoning.append(f"🔍 Early signal: {platform} leading by {ratio:.1f}x")
+            
+            # 6. High Confidence Composite Signal - check sentiment alignment
             if signal and signal.confidence > 0.7:
                 if signal.signal_strength.value in ["strong_bullish", "bullish"]:
-                    setups.append("composite_bullish")
-                    conviction += 0.1
-                    reasoning.append(f"✅ High-confidence bullish signal ({signal.confidence:.0%})")
+                    if is_bullish_sentiment or sentiment is None:
+                        setups.append("composite_bullish")
+                        conviction += 0.1
+                        reasoning.append(f"✅ High-confidence bullish signal ({signal.confidence:.0%})")
+                    else:
+                        reasoning.append(f"⚠️ Bullish signal but bearish sentiment - caution")
                 elif signal.signal_strength.value in ["strong_bearish", "bearish"]:
-                    setups.append("composite_bearish")
-                    conviction += 0.1
-                    reasoning.append(f"✅ High-confidence bearish signal ({signal.confidence:.0%})")
+                    if is_bearish_sentiment or sentiment is None:
+                        setups.append("composite_bearish")
+                        conviction += 0.1
+                        reasoning.append(f"✅ High-confidence bearish signal ({signal.confidence:.0%})")
+                    else:
+                        reasoning.append(f"⚠️ Bearish signal but bullish sentiment - caution")
             
             # Calculate overall conviction score
             conviction = min(conviction, 1.0)
             
-            # Determine entry recommendation
+            # Determine entry recommendation - consider sentiment alignment
+            # For long setups, require bullish sentiment or neutral
+            # For short setups, require bearish sentiment or neutral
+            can_long = is_bullish_sentiment or sentiment is None or sentiment > -0.2
+            can_short = is_bearish_sentiment or sentiment is None or sentiment < 0.2
+            
             if conviction >= 0.6:
-                recommendation = "STRONG BUY" if signal and signal.composite_score > 0 else "STRONG SELL"
+                if signal and signal.composite_score > 0 and can_long:
+                    recommendation = "STRONG BUY"
+                elif signal and signal.composite_score < 0 and can_short:
+                    recommendation = "STRONG SELL"
+                else:
+                    recommendation = "WATCH"  # High conviction but sentiment mismatch
             elif conviction >= 0.4:
-                recommendation = "BUY" if signal and signal.composite_score > 0 else "SELL"
+                if signal and signal.composite_score > 0 and can_long:
+                    recommendation = "BUY"
+                elif signal and signal.composite_score < 0 and can_short:
+                    recommendation = "SELL"
+                else:
+                    recommendation = "WATCH"
             elif conviction >= 0.2:
                 recommendation = "WATCH"
             else:
@@ -136,12 +186,16 @@ class EntryScanner:
                 'setups': setups,
                 'reasoning': reasoning,
                 'mentions': enriched.total_mentions,
+                'weighted_mentions': weighted_mentions,
+                'organic': is_organic,
+                'sentiment': sentiment,
                 'velocity': enriched.delta_mentions,
                 'acceleration': enriched.acceleration if enriched.acceleration is not None else 0,
                 'mindshare': enriched.mindshare_score,
                 'composite_score': signal.composite_score if signal else 0,
                 'confidence': signal.confidence if signal else 0,
                 'anomaly': anomaly,
+                'divergence': divergence if has_early_signal else None,
                 'timestamp': datetime.now()
             }
         
@@ -185,22 +239,42 @@ class EntryScanner:
                     } if market_data else None
                 )
                 
+                # Check organic status
+                organic_analysis = is_organic_narrative_spike(enriched.ticker, enriched.window, min_mentions=1)
+                is_organic = organic_analysis.get("is_organic", True)
+                
+                # Get weighted mentions
+                from elfa_client import get_ticker_narrative_snapshot
+                snapshot = get_ticker_narrative_snapshot(enriched.ticker, enriched.window)
+                weighted_data = calculate_weighted_mentions(snapshot) if snapshot else {}
+                weighted_mentions = weighted_data.get("weighted_mentions", enriched.total_mentions)
+                
+                # Check sentiment
+                sentiment = enriched.sentiment_score
+                is_bullish_sentiment = sentiment is not None and sentiment > 0.2
+                is_bearish_sentiment = sentiment is not None and sentiment < -0.2
+                
+                # Check divergence
+                divergence = calculate_platform_divergence(enriched.ticker, enriched.window)
+                has_early_signal = divergence and divergence.get("early_signal", False)
+                
                 # Analyze for entry setups
                 setups = []
                 conviction = 0.0
                 reasoning = []
                 
-                # 1. Narrative Spike
-                if enriched.delta_mentions > 20 and enriched.acceleration is not None and enriched.acceleration > 10:
+                # 1. Narrative Spike - only if organic
+                if is_organic and enriched.delta_mentions > 20 and enriched.acceleration is not None and enriched.acceleration > 10:
                     setups.append("spike")
                     conviction += 0.3
-                    reasoning.append(f"🚀 Narrative spike: +{enriched.delta_mentions} mentions")
+                    reasoning.append(f"🚀 Organic narrative spike: +{enriched.delta_mentions} mentions")
                 
-                # 2. Strong Velocity
+                # 2. Strong Velocity - use weighted mentions
                 if velocity_data and velocity_data.get('mentions_velocity', 0) > 15:
-                    setups.append("momentum")
-                    conviction += 0.25
-                    reasoning.append(f"📈 Strong momentum: {velocity_data['mentions_velocity']:.1f} mentions/snapshot")
+                    if weighted_mentions > enriched.total_mentions * 0.8:
+                        setups.append("momentum")
+                        conviction += 0.25
+                        reasoning.append(f"📈 Strong momentum: {velocity_data['mentions_velocity']:.1f} mentions/snapshot (weighted: {weighted_mentions:.1f})")
                 
                 # 3. Anomaly
                 if anomaly and abs(anomaly['z_score']) >= 2.5:
@@ -209,22 +283,32 @@ class EntryScanner:
                     direction = "spike" if anomaly['z_score'] > 0 else "drop"
                     reasoning.append(f"🚨 Statistical anomaly: {anomaly['z_score']:+.1f}σ ({direction})")
                 
-                # 4. Smart Money Activity (consistent with scan_ticker)
+                # 4. Smart Money Activity
                 if enriched.new_accounts and len(enriched.new_accounts) >= 2:
                     setups.append("smart_money")
                     conviction += 0.15
                     reasoning.append(f"💡 Smart money: {len(enriched.new_accounts)} new accounts")
                 
-                # 5. High Confidence Composite Signal (consistent with scan_ticker)
+                # 5. Cross-platform divergence
+                if has_early_signal:
+                    setups.append("divergence")
+                    conviction += 0.2
+                    ratio = divergence.get("divergence_ratio", 1.0)
+                    platform = divergence.get("leading_platform", "unknown")
+                    reasoning.append(f"🔍 Early signal: {platform} leading by {ratio:.1f}x")
+                
+                # 6. High Confidence Composite Signal - check sentiment alignment
                 if signal and signal.confidence > 0.7:
                     if signal.signal_strength.value in ["strong_bullish", "bullish"]:
-                        setups.append("composite_bullish")
-                        conviction += 0.1
-                        reasoning.append(f"✅ High-confidence bullish signal ({signal.confidence:.0%})")
+                        if is_bullish_sentiment or sentiment is None:
+                            setups.append("composite_bullish")
+                            conviction += 0.1
+                            reasoning.append(f"✅ High-confidence bullish signal ({signal.confidence:.0%})")
                     elif signal.signal_strength.value in ["strong_bearish", "bearish"]:
-                        setups.append("composite_bearish")
-                        conviction += 0.1
-                        reasoning.append(f"✅ High-confidence bearish signal ({signal.confidence:.0%})")
+                        if is_bearish_sentiment or sentiment is None:
+                            setups.append("composite_bearish")
+                            conviction += 0.1
+                            reasoning.append(f"✅ High-confidence bearish signal ({signal.confidence:.0%})")
                 
                 results.append({
                     'ticker': enriched.ticker,
@@ -233,7 +317,11 @@ class EntryScanner:
                     'reasoning': reasoning,
                     'signal': signal,
                     'velocity': velocity_data,
-                    'anomaly': anomaly
+                    'anomaly': anomaly,
+                    'weighted_mentions': weighted_mentions,
+                    'organic': is_organic,
+                    'sentiment': sentiment,
+                    'divergence': divergence if has_early_signal else None
                 })
             except Exception as e:
                 print(f"Warning: Failed to scan {enriched.ticker if enriched else 'unknown'}: {e}")
@@ -290,10 +378,23 @@ class EntryScanner:
                 print(f"   {reason}")
             
             # Print metrics
-            print(f"   Metrics: {result['mentions']} mentions, "
-                  f"velocity {result['velocity']:+d}, "
-                  f"accel {result['acceleration']:+d}, " if result.get('acceleration') is not None else "accel N/A, "
-                  f"mindshare {result['mindshare']:.2f}" if result['mindshare'] else "N/A")
+            metrics_parts = [
+                f"{result['mentions']} mentions",
+                f"weighted {result.get('weighted_mentions', result['mentions']):.1f}" if result.get('weighted_mentions') else None,
+                f"velocity {result['velocity']:+d}",
+                f"accel {result['acceleration']:+d}" if result.get('acceleration') is not None else "accel N/A",
+                f"mindshare {result['mindshare']:.2f}" if result.get('mindshare') else None
+            ]
+            metrics_str = ", ".join([m for m in metrics_parts if m])
+            print(f"   Metrics: {metrics_str}")
+            
+            # Print sentiment and organic status
+            if result.get('sentiment') is not None:
+                sentiment_label = "Bullish" if result['sentiment'] > 0.2 else "Bearish" if result['sentiment'] < -0.2 else "Neutral"
+                print(f"   Sentiment: {result['sentiment']:+.2f} ({sentiment_label})")
+            if result.get('organic') is not None:
+                organic_label = "✅ Organic" if result['organic'] else "⚠️ News-driven"
+                print(f"   Status: {organic_label}")
             
             if result['composite_score']:
                 print(f"   Signal: {result['composite_score']:+.2f} "

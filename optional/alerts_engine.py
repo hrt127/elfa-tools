@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import existing data structures
-from elfa_client import TickerNarrativeSnapshot
+from elfa_client import TickerNarrativeSnapshot, is_organic_narrative_spike, calculate_weighted_mentions, calculate_platform_divergence, get_trending_contracts
 from narrative_enricher import EnrichedSnapshot
 
 # Optional YAML support
@@ -214,14 +214,40 @@ class AlertsEngine:
         """Normalize data from various formats to dict. Never raises exceptions."""
         try:
             if isinstance(data, (TickerNarrativeSnapshot, EnrichedSnapshot)):
+                # Calculate weighted mentions if not already present
+                weighted_mentions = None
+                if isinstance(data, EnrichedSnapshot) and data.weighted_mentions is not None:
+                    weighted_mentions = data.weighted_mentions
+                elif isinstance(data, TickerNarrativeSnapshot):
+                    weighted_data = calculate_weighted_mentions(data)
+                    weighted_mentions = weighted_data.get("weighted_mentions")
+                
+                # Check organic status
+                is_organic = True
+                organic_mentions = getattr(data, 'organic_mentions', 0)
+                news_mentions = getattr(data, 'news_mentions', 0)
+                if isinstance(data, TickerNarrativeSnapshot):
+                    analysis = is_organic_narrative_spike(data.ticker, data.window, min_mentions=1)
+                    is_organic = analysis.get("is_organic", True)
+                    organic_mentions = data.organic_mentions
+                    news_mentions = data.news_mentions
+                elif isinstance(data, EnrichedSnapshot):
+                    is_organic = organic_mentions > 0 or news_mentions == 0
+                
                 return {
                     'ticker': data.ticker,
                     'mentions': data.total_mentions,
+                    'weighted_mentions': weighted_mentions,
+                    'organic_mentions': organic_mentions,
+                    'news_mentions': news_mentions,
+                    'is_organic': is_organic,
+                    'sentiment_score': getattr(data, 'sentiment_score', None),
                     'mindshare': data.mindshare_score,
                     'smart_accounts': data.top_smart_accounts,
                     'smart_accounts_count': len(data.top_smart_accounts) if data.top_smart_accounts else 0,
                     'mentions_velocity': getattr(data, 'delta_mentions', 0) if isinstance(data, EnrichedSnapshot) else 0,
-                    'acceleration': getattr(data, 'acceleration', 0) if isinstance(data, EnrichedSnapshot) else 0
+                    'acceleration': getattr(data, 'acceleration', 0) if isinstance(data, EnrichedSnapshot) else 0,
+                    'window': getattr(data, 'window', '1h')
                 }
             elif isinstance(data, dict):
                 return data
@@ -374,16 +400,25 @@ class RuleFactory:
     """Pre-built alert rule templates."""
     
     @staticmethod
-    def spike_detector(ticker: str, threshold: int = 50) -> AlertRule:
-        """Alert when mentions spike above threshold."""
+    def spike_detector(ticker: str, threshold: int = 50, organic_only: bool = False) -> AlertRule:
+        """Alert when mentions spike above threshold. Optionally filter to organic spikes only."""
+        def condition(d):
+            mentions = d.get('mentions', 0)
+            if mentions <= threshold:
+                return False
+            if organic_only:
+                return d.get('is_organic', True)
+            return True
+        
         return AlertRule(
-            name=f"{ticker}_spike",
+            name=f"{ticker}_spike" + ("_organic" if organic_only else ""),
             ticker=ticker,
-            condition=lambda d: d.get('mentions', 0) > threshold,
+            condition=condition,
             message_template=(
                 "🔥 SPIKE: {ticker}\n"
                 "{mentions} mentions (threshold: " + str(threshold) + ")\n"
-                "Mindshare: {mindshare:.2f}"
+                "Mindshare: {mindshare:.2f}" +
+                ("\n✅ Organic spike" if organic_only else "")
             ),
             cooldown_minutes=30
         )
@@ -445,6 +480,121 @@ class RuleFactory:
                 "🎯 HIGH MINDSHARE: {ticker}\n"
                 "Score: {mindshare:.2f} (threshold: " + str(threshold) + ")\n"
                 "Mentions: {mentions}"
+            ),
+            cooldown_minutes=45
+        )
+    
+    @staticmethod
+    def contract_address_alert(platform: str = "twitter", min_mentions: int = 20, limit: int = 10) -> AlertRule:
+        """Alert when contract addresses are trending."""
+        def condition(d):
+            # This rule works differently - it checks trending contracts
+            # We'll need to fetch contracts separately
+            contracts = get_trending_contracts(platform=platform, window="1h", limit=limit)
+            if contracts:
+                # Check if any contract has enough mentions
+                return any(c.mentions >= min_mentions for c in contracts)
+            return False
+        
+        return AlertRule(
+            name=f"contract_trending_{platform}",
+            ticker="*",  # Wildcard for all contracts
+            condition=condition,
+            message_template=(
+                f"🔍 TRENDING CONTRACT: {{address}}\n"
+                f"{{mentions}} mentions on {platform}\n"
+                f"Top accounts: {{top_accounts}}"
+            ),
+            cooldown_minutes=60
+        )
+    
+    @staticmethod
+    def platform_divergence_alert(ticker: str, min_ratio: float = 2.0) -> AlertRule:
+        """Alert when cross-platform divergence detected (early signal)."""
+        def condition(d):
+            divergence = calculate_platform_divergence(ticker, d.get('window', '1h'))
+            if divergence and divergence.get("early_signal", False):
+                ratio = divergence.get("divergence_ratio", 1.0)
+                return ratio >= min_ratio
+            return False
+        
+        return AlertRule(
+            name=f"{ticker}_divergence",
+            ticker=ticker,
+            condition=condition,
+            message_template=(
+                "🔍 PLATFORM DIVERGENCE: {ticker}\n"
+                "Early signal detected!\n"
+                "Telegram: {telegram_mentions} mentions\n"
+                "Twitter: {twitter_mentions} mentions\n"
+                "Ratio: {divergence_ratio:.1f}x"
+            ),
+            cooldown_minutes=45
+        )
+    
+    @staticmethod
+    def organic_spike_alert(ticker: str, threshold: int = 30) -> AlertRule:
+        """Alert when organic narrative spike detected (excluding news-driven)."""
+        def condition(d):
+            mentions = d.get('mentions', 0)
+            if mentions < threshold:
+                return False
+            return d.get('is_organic', True)
+        
+        return AlertRule(
+            name=f"{ticker}_organic_spike",
+            ticker=ticker,
+            condition=condition,
+            message_template=(
+                "✅ ORGANIC SPIKE: {ticker}\n"
+                "{organic_mentions} organic mentions (total: {mentions})\n"
+                "News ratio: {news_ratio:.0%}"
+            ),
+            cooldown_minutes=30
+        )
+    
+    @staticmethod
+    def sentiment_alert(ticker: str, min_sentiment: float = 0.3, bearish: bool = False) -> AlertRule:
+        """Alert when sentiment crosses threshold (bullish or bearish)."""
+        def condition(d):
+            sentiment = d.get('sentiment_score')
+            if sentiment is None:
+                return False
+            if bearish:
+                return sentiment <= -min_sentiment
+            else:
+                return sentiment >= min_sentiment
+        
+        direction = "bearish" if bearish else "bullish"
+        return AlertRule(
+            name=f"{ticker}_sentiment_{direction}",
+            ticker=ticker,
+            condition=condition,
+            message_template=(
+                f"📊 {direction.upper()} SENTIMENT: {{ticker}}\n"
+                f"Sentiment score: {{sentiment_score:+.2f}}\n"
+                f"Mentions: {{mentions}}"
+            ),
+            cooldown_minutes=60
+        )
+    
+    @staticmethod
+    def weighted_mentions_alert(ticker: str, threshold: float = 50.0) -> AlertRule:
+        """Alert when weighted mentions (account-type weighted) exceed threshold."""
+        def condition(d):
+            weighted = d.get('weighted_mentions')
+            if weighted is None:
+                return False
+            return weighted >= threshold
+        
+        return AlertRule(
+            name=f"{ticker}_weighted_mentions",
+            ticker=ticker,
+            condition=condition,
+            message_template=(
+                "⚖️ WEIGHTED MENTIONS: {ticker}\n"
+                "Weighted: {weighted_mentions:.1f} (raw: {mentions})\n"
+                "High-quality account activity detected"
             ),
             cooldown_minutes=45
         )

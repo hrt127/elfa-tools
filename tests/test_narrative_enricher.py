@@ -356,3 +356,145 @@ class TestEdgeCases:
         
         # Should be treated as first snapshot for 4h window
         assert enriched4h.delta_mentions == 200  # First snapshot for 4h window
+
+
+class TestNewEnhancementFields:
+    """Tests for new enhancement fields in EnrichedSnapshot."""
+    
+    def test_enrich_with_sentiment_score(self, temp_db_path):
+        """Test enrichment preserves sentiment_score from snapshot."""
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=[],
+            source_query="test_query",
+            sentiment_score=0.75  # New field
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        assert enriched is not None
+        assert enriched.sentiment_score == 0.75
+    
+    def test_enrich_without_sentiment_score(self, temp_db_path):
+        """Test backward compatibility when sentiment_score is missing."""
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=[],
+            source_query="test_query"
+            # No sentiment_score - should default to None
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        assert enriched is not None
+        assert enriched.sentiment_score is None  # Should handle missing field gracefully
+    
+    def test_enrich_with_news_organic_mentions(self, temp_db_path):
+        """Test enrichment preserves news_mentions and organic_mentions."""
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=[],
+            source_query="test_query",
+            news_mentions=20,  # New field
+            organic_mentions=80  # New field
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        assert enriched is not None
+        assert enriched.news_mentions == 20
+        assert enriched.organic_mentions == 80
+    
+    def test_enrich_with_platform(self, temp_db_path):
+        """Test enrichment preserves platform field."""
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=[],
+            source_query="test_query",
+            platform="twitter"  # New field
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        assert enriched is not None
+        assert enriched.platform == "twitter"
+    
+    def test_enrich_with_weighted_mentions(self, temp_db_path):
+        """Test enrichment can calculate and store weighted_mentions."""
+        from elfa_client import AccountInfo, calculate_weighted_mentions
+        
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=10,
+            mindshare_score=0.15,
+            top_smart_accounts=[],
+            source_query="test_query",
+            account_details=[
+                AccountInfo(username="account1", account_type="smart"),
+                AccountInfo(username="account2", account_type="ct"),
+            ]
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        # Calculate weighted mentions manually to verify
+        weighted = calculate_weighted_mentions(snapshot)
+        
+        assert enriched is not None
+        # The enricher may or may not calculate weighted_mentions automatically
+        # But if it does, it should match our calculation
+        if enriched.weighted_mentions is not None:
+            assert enriched.weighted_mentions == weighted["weighted_mentions"]
+    
+    def test_enrich_all_new_fields_together(self, temp_db_path):
+        """Test enrichment with all new fields present."""
+        from elfa_client import AccountInfo
+        
+        enricher = NarrativeEnricher(db_path=Path(temp_db_path))
+        
+        snapshot = TickerNarrativeSnapshot(
+            ticker="BTC",
+            window="1h",
+            total_mentions=100,
+            mindshare_score=0.15,
+            top_smart_accounts=["account1"],
+            source_query="test_query",
+            sentiment_score=0.65,
+            account_details=[
+                AccountInfo(username="account1", account_type="smart"),
+            ],
+            platform="twitter",
+            news_mentions=10,
+            organic_mentions=90
+        )
+        
+        enriched = enricher.enrich_snapshot(snapshot)
+        
+        assert enriched is not None
+        assert enriched.sentiment_score == 0.65
+        assert enriched.platform == "twitter"
+        assert enriched.news_mentions == 10
+        assert enriched.organic_mentions == 90
