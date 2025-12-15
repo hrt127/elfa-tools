@@ -1,6 +1,7 @@
 import os
 import time
 from pathlib import Path
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from collections import defaultdict
@@ -106,7 +107,12 @@ def _cache_result(cache_key: str, result: TickerNarrativeSnapshot, ttl: int = No
     _cache[cache_key] = (result, expiry_time)
 
 
-def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bool = True) -> Optional[TickerNarrativeSnapshot]:
+def get_ticker_narrative_snapshot(
+    ticker: str,
+    window: str = "1h",
+    use_cache: bool = True,
+    source: Optional[str] = None
+) -> Optional[TickerNarrativeSnapshot]:
 
     """
     Get mentions and mindshare data for a ticker over the given time window using the Elfa V2 API.
@@ -154,9 +160,15 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
             "page": 0,
             "pageSize": 10,
         }
+        
+        # Add source parameter if specified (for platform filtering)
+        if source:
+            params["source"] = source
 
         # Build source_query for audit trail
         source_query = f"GET {url}?ticker={ticker}&timeWindow={window}&page=0&pageSize=10"
+        if source:
+            source_query += f"&source={source}"
 
         try:
             response = requests.get(url, headers=headers, params=params, timeout=10)
@@ -292,7 +304,7 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
                 source_query=source_query,
                 sentiment_score=sentiment_score,
                 account_details=account_details,
-                platform=None,  # Default to None (can be set via source parameter)
+                platform=source,  # Set platform from source parameter
                 news_mentions=news_mentions,
                 organic_mentions=organic_mentions
             )
@@ -374,5 +386,711 @@ def get_cache_stats() -> Dict[str, Any]:
         "valid_entries": valid_entries,
         "expired_entries": expired_entries,
         "cache_ttl_seconds": _cache_ttl
+    }
+
+
+# ============================================================================
+# NEW ENDPOINTS: Contract Addresses, Trending Tokens, Events, Multi-Keyword
+# ============================================================================
+
+@dataclass
+class ContractAddressData:
+    """Data for a trending contract address."""
+    address: str
+    mentions: int
+    platform: str  # "twitter" or "telegram"
+    top_accounts: List[str]
+    timestamp: Optional[datetime] = None
+    source_query: str = ""
+
+
+@dataclass
+class TrendingToken:
+    """Data for a trending token."""
+    ticker: str
+    mentions: int
+    mindshare_score: Optional[float]
+    sentiment_score: Optional[float]
+    smart_accounts: List[str]
+    source_query: str = ""
+
+
+@dataclass
+class EventSummary:
+    """Event summary from keyword mentions."""
+    event_id: str
+    keywords: List[str]
+    mentions: int
+    description: Optional[str]
+    top_accounts: List[str]
+    timestamp: Optional[datetime] = None
+    source_query: str = ""
+
+
+def get_trending_contracts(
+    platform: str = "twitter",
+    window: str = "1h",
+    limit: int = 20,
+    use_cache: bool = True
+) -> Optional[List[ContractAddressData]]:
+    """
+    Get trending contract addresses on Twitter or Telegram.
+    
+    Args:
+        platform: "twitter" or "telegram"
+        window: Time window ("1h", "4h", "24h")
+        limit: Maximum number of results
+        use_cache: Whether to use cached results
+        
+    Returns:
+        List of ContractAddressData, or None if unavailable
+    """
+    try:
+        base_url = "https://api.elfa.ai"
+        api_key = os.getenv("ELFA_API_KEY")
+        
+        if not api_key:
+            return None
+        
+        # Try different possible endpoint formats
+        endpoint = f"/v2/data/contracts/{platform}"
+        cache_key = f"contracts:{platform}:{window}:{limit}"
+        
+        if use_cache:
+            cached = _get_cached_result(cache_key)
+            if cached is not None:
+                return cached
+        
+        if _is_rate_limited(endpoint):
+            return None
+        
+        headers = {
+            "x-elfa-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{base_url}{endpoint}"
+        params = {
+            "timeWindow": window,
+            "limit": limit
+        }
+        
+        source_query = f"GET {url}?platform={platform}&timeWindow={window}&limit={limit}"
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                # Endpoint might not exist yet, return None gracefully
+                return None
+            
+            data = response.json()
+            results = data.get("results", []) or data.get("data", [])
+            
+            contracts = []
+            for item in results:
+                address = item.get("address") or item.get("contract_address")
+                if not address:
+                    continue
+                
+                mentions = item.get("mentions") or item.get("count") or 0
+                accounts_data = item.get("top_accounts") or item.get("accounts") or []
+                top_accounts = []
+                
+                for acc in accounts_data[:5]:
+                    if isinstance(acc, dict):
+                        username = acc.get("username") or acc.get("handle") or str(acc.get("id", ""))
+                    else:
+                        username = str(acc)
+                    if username:
+                        top_accounts.append(username)
+                
+                contracts.append(ContractAddressData(
+                    address=address,
+                    mentions=int(mentions),
+                    platform=platform,
+                    top_accounts=top_accounts,
+                    source_query=source_query
+                ))
+            
+            if use_cache:
+                _cache_result(cache_key, contracts)
+            
+            return contracts
+            
+        except Exception:
+            # Endpoint might not exist, fail gracefully
+            return None
+            
+    except Exception:
+        return None
+
+
+def get_trending_tokens(
+    window: str = "1h",
+    limit: int = 20,
+    use_cache: bool = True
+) -> Optional[List[TrendingToken]]:
+    """
+    Get trending tokens leaderboard.
+    
+    Args:
+        window: Time window ("1h", "4h", "24h")
+        limit: Maximum number of results
+        use_cache: Whether to use cached results
+        
+    Returns:
+        List of TrendingToken, or None if unavailable
+    """
+    try:
+        base_url = "https://api.elfa.ai"
+        api_key = os.getenv("ELFA_API_KEY")
+        
+        if not api_key:
+            return None
+        
+        # Try different possible endpoint formats
+        endpoint = "/v2/data/trending"
+        cache_key = f"trending:{window}:{limit}"
+        
+        if use_cache:
+            cached = _get_cached_result(cache_key)
+            if cached is not None:
+                return cached
+        
+        if _is_rate_limited(endpoint):
+            return None
+        
+        headers = {
+            "x-elfa-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{base_url}{endpoint}"
+        params = {
+            "timeWindow": window,
+            "limit": limit
+        }
+        
+        source_query = f"GET {url}?timeWindow={window}&limit={limit}"
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                # Endpoint might not exist yet, return None gracefully
+                return None
+            
+            data = response.json()
+            results = data.get("results", []) or data.get("data", [])
+            
+            tokens = []
+            for item in results:
+                ticker = item.get("ticker") or item.get("symbol")
+                if not ticker:
+                    continue
+                
+                mentions = item.get("mentions") or item.get("total_mentions") or 0
+                mindshare = item.get("mindshare_score") or item.get("mindshare")
+                sentiment = item.get("sentiment_score") or item.get("sentiment")
+                
+                accounts_data = item.get("top_smart_accounts") or item.get("smart_accounts") or []
+                smart_accounts = []
+                for acc in accounts_data[:5]:
+                    if isinstance(acc, dict):
+                        username = acc.get("username") or acc.get("handle") or str(acc.get("id", ""))
+                    else:
+                        username = str(acc)
+                    if username:
+                        smart_accounts.append(username)
+                
+                tokens.append(TrendingToken(
+                    ticker=str(ticker),
+                    mentions=int(mentions),
+                    mindshare_score=float(mindshare) if mindshare is not None else None,
+                    sentiment_score=float(sentiment) if sentiment is not None else None,
+                    smart_accounts=smart_accounts,
+                    source_query=source_query
+                ))
+            
+            if use_cache:
+                _cache_result(cache_key, tokens)
+            
+            return tokens
+            
+        except Exception:
+            # Endpoint might not exist, fail gracefully
+            return None
+            
+    except Exception:
+        return None
+
+
+def get_event_summary(
+    keywords: List[str],
+    window: str = "24h",
+    use_cache: bool = True
+) -> Optional[List[EventSummary]]:
+    """
+    Get event summaries from keyword mentions.
+    
+    Args:
+        keywords: List of keywords to search for
+        window: Time window ("1h", "4h", "24h")
+        use_cache: Whether to use cached results
+        
+    Returns:
+        List of EventSummary, or None if unavailable
+    """
+    try:
+        base_url = "https://api.elfa.ai"
+        api_key = os.getenv("ELFA_API_KEY")
+        
+        if not api_key:
+            return None
+        
+        endpoint = "/v2/data/events"
+        cache_key = f"events:{':'.join(sorted(keywords))}:{window}"
+        
+        if use_cache:
+            cached = _get_cached_result(cache_key)
+            if cached is not None:
+                return cached
+        
+        if _is_rate_limited(endpoint):
+            return None
+        
+        headers = {
+            "x-elfa-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{base_url}{endpoint}"
+        params = {
+            "keywords": ",".join(keywords),
+            "timeWindow": window
+        }
+        
+        source_query = f"GET {url}?keywords={','.join(keywords)}&timeWindow={window}"
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                # Endpoint might not exist yet, return None gracefully
+                return None
+            
+            data = response.json()
+            results = data.get("results", []) or data.get("data", [])
+            
+            events = []
+            for item in results:
+                event_id = item.get("id") or item.get("event_id") or str(len(events))
+                event_keywords = item.get("keywords") or keywords
+                mentions = item.get("mentions") or item.get("count") or 0
+                description = item.get("description") or item.get("summary")
+                
+                accounts_data = item.get("top_accounts") or item.get("accounts") or []
+                top_accounts = []
+                for acc in accounts_data[:5]:
+                    if isinstance(acc, dict):
+                        username = acc.get("username") or acc.get("handle") or str(acc.get("id", ""))
+                    else:
+                        username = str(acc)
+                    if username:
+                        top_accounts.append(username)
+                
+                events.append(EventSummary(
+                    event_id=str(event_id),
+                    keywords=event_keywords if isinstance(event_keywords, list) else [str(k) for k in event_keywords],
+                    mentions=int(mentions),
+                    description=str(description) if description else None,
+                    top_accounts=top_accounts,
+                    source_query=source_query
+                ))
+            
+            if use_cache:
+                _cache_result(cache_key, events)
+            
+            return events
+            
+        except Exception:
+            # Endpoint might not exist, fail gracefully
+            return None
+            
+    except Exception:
+        return None
+
+
+def get_multi_keyword_mentions(
+    keywords: List[str],
+    window: str = "24h",
+    use_cache: bool = True
+) -> Optional[Dict[str, TickerNarrativeSnapshot]]:
+    """
+    Get mentions for multiple keywords/tickers in one query.
+    
+    Args:
+        keywords: List of ticker symbols or keywords
+        window: Time window ("1h", "4h", "24h")
+        use_cache: Whether to use cached results
+        
+    Returns:
+        Dictionary mapping keyword to TickerNarrativeSnapshot, or None if unavailable
+    """
+    try:
+        base_url = "https://api.elfa.ai"
+        api_key = os.getenv("ELFA_API_KEY")
+        
+        if not api_key:
+            return None
+        
+        endpoint = "/v2/data/mentions"
+        cache_key = f"multi:{':'.join(sorted(keywords))}:{window}"
+        
+        if use_cache:
+            cached = _get_cached_result(cache_key)
+            if cached is not None:
+                return cached
+        
+        if _is_rate_limited(endpoint):
+            return None
+        
+        headers = {
+            "x-elfa-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{base_url}{endpoint}"
+        params = {
+            "keywords": ",".join(keywords),
+            "timeWindow": window
+        }
+        
+        source_query = f"GET {url}?keywords={','.join(keywords)}&timeWindow={window}"
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                # Fallback: query each keyword individually
+                results = {}
+                for keyword in keywords:
+                    snapshot = get_ticker_narrative_snapshot(keyword, window, use_cache)
+                    if snapshot:
+                        results[keyword] = snapshot
+                return results if results else None
+            
+            data = response.json()
+            results_data = data.get("results", []) or data.get("data", [])
+            
+            results = {}
+            for item in results_data:
+                ticker = item.get("ticker") or item.get("keyword")
+                if not ticker:
+                    continue
+                
+                # Reuse existing parsing logic
+                total_mentions = item.get("total_mentions") or item.get("mentions") or 0
+                mindshare_score = item.get("mindshare_score") or item.get("mindshare")
+                sentiment_score = item.get("sentiment_score") or item.get("sentiment")
+                
+                accounts_data = item.get("top_smart_accounts") or item.get("smart_accounts") or []
+                top_smart_accounts = []
+                account_details = []
+                
+                for acc in accounts_data[:10]:
+                    if isinstance(acc, dict):
+                        username = acc.get("username") or acc.get("handle") or str(acc.get("id", ""))
+                        account_type = acc.get("type") or acc.get("account_type")
+                    else:
+                        username = str(acc)
+                        account_type = None
+                    
+                    if username:
+                        top_smart_accounts.append(username)
+                        account_details.append(AccountInfo(
+                            username=username,
+                            account_type=account_type
+                        ))
+                
+                results[ticker] = TickerNarrativeSnapshot(
+                    ticker=str(ticker),
+                    window=window,
+                    total_mentions=int(total_mentions),
+                    mindshare_score=float(mindshare_score) if mindshare_score is not None else None,
+                    top_smart_accounts=top_smart_accounts[:3],
+                    source_query=source_query,
+                    sentiment_score=float(sentiment_score) if sentiment_score is not None else None,
+                    account_details=account_details
+                )
+            
+            if use_cache:
+                _cache_result(cache_key, results)
+            
+            return results if results else None
+            
+        except Exception as e:
+            # Fallback to individual queries
+            results = {}
+            for keyword in keywords:
+                snapshot = get_ticker_narrative_snapshot(keyword, window, use_cache)
+                if snapshot:
+                    results[keyword] = snapshot
+            return results if results else None
+            
+    except Exception:
+        return None
+
+
+# ============================================================================
+# CROSS-PLATFORM ANALYSIS
+# ============================================================================
+
+def get_cross_platform_snapshot(
+    ticker: str,
+    window: str = "1h",
+    use_cache: bool = True
+) -> Optional[Dict[str, TickerNarrativeSnapshot]]:
+    """
+    Get narrative data for a ticker from both Twitter and Telegram.
+    
+    Args:
+        ticker: Ticker symbol
+        window: Time window
+        use_cache: Whether to use cached results
+        
+    Returns:
+        Dictionary with "twitter" and "telegram" keys, or None if unavailable
+    """
+    results = {}
+    
+    # Try to get Twitter data (default)
+    twitter_snap = get_ticker_narrative_snapshot(ticker, window, use_cache)
+    if twitter_snap:
+        twitter_snap.platform = "twitter"
+        results["twitter"] = twitter_snap
+    
+    # Try to get Telegram data (might need source parameter)
+    # For now, we'll try the same endpoint with a source parameter
+    try:
+        base_url = "https://api.elfa.ai"
+        api_key = os.getenv("ELFA_API_KEY")
+        
+        if api_key:
+            endpoint = "/v2/data/top-mentions"
+            if not _is_rate_limited(endpoint):
+                headers = {
+                    "x-elfa-api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+                url = f"{base_url}{endpoint}"
+                params = {
+                    "ticker": ticker,
+                    "timeWindow": window,
+                    "source": "telegram"  # Try source parameter
+                }
+                
+                try:
+                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        results_data = data.get("results", [])
+                        for entry in results_data:
+                            if str(entry.get("ticker", "")).upper() == ticker.upper():
+                                # Parse similar to main function
+                                total_mentions = entry.get("total_mentions") or 0
+                                mindshare_score = entry.get("mindshare_score")
+                                accounts_data = entry.get("top_smart_accounts") or []
+                                top_smart_accounts = [acc.get("username", "") if isinstance(acc, dict) else str(acc) for acc in accounts_data[:3]]
+                                
+                                telegram_snap = TickerNarrativeSnapshot(
+                                    ticker=ticker,
+                                    window=window,
+                                    total_mentions=int(total_mentions),
+                                    mindshare_score=float(mindshare_score) if mindshare_score else None,
+                                    top_smart_accounts=top_smart_accounts,
+                                    source_query=f"GET {url}?ticker={ticker}&timeWindow={window}&source=telegram",
+                                    platform="telegram"
+                                )
+                                results["telegram"] = telegram_snap
+                                break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    
+    return results if results else None
+
+
+def calculate_platform_divergence(
+    ticker: str,
+    window: str = "1h",
+    use_cache: bool = True
+) -> Optional[Dict[str, Any]]:
+    """
+    Calculate divergence between Twitter and Telegram narratives.
+    
+    Returns metrics showing which platform is leading and by how much.
+    
+    Args:
+        ticker: Ticker symbol
+        window: Time window
+        use_cache: Whether to use cached results
+        
+    Returns:
+        Dictionary with divergence metrics, or None if unavailable
+    """
+    platforms = get_cross_platform_snapshot(ticker, window, use_cache)
+    
+    if not platforms or len(platforms) < 2:
+        return None
+    
+    twitter = platforms.get("twitter")
+    telegram = platforms.get("telegram")
+    
+    if not twitter or not telegram:
+        return None
+    
+    twitter_mentions = twitter.total_mentions
+    telegram_mentions = telegram.total_mentions
+    
+    divergence = {
+        "ticker": ticker,
+        "window": window,
+        "twitter_mentions": twitter_mentions,
+        "telegram_mentions": telegram_mentions,
+        "mention_delta": telegram_mentions - twitter_mentions,
+        "leading_platform": "telegram" if telegram_mentions > twitter_mentions else "twitter",
+        "divergence_ratio": telegram_mentions / twitter_mentions if twitter_mentions > 0 else float('inf'),
+        "early_signal": telegram_mentions > twitter_mentions * 1.2,  # Telegram 20%+ higher
+        "twitter_snapshot": twitter,
+        "telegram_snapshot": telegram
+    }
+    
+    return divergence
+
+
+# ============================================================================
+# ACCOUNT-TYPE WEIGHTING
+# ============================================================================
+
+def calculate_weighted_mentions(
+    snapshot: TickerNarrativeSnapshot,
+    smart_weight: float = 3.0,
+    ct_weight: float = 1.0,
+    news_weight: float = 0.5
+) -> Dict[str, Any]:
+    """
+    Calculate weighted mentions based on account types.
+    
+    Smart accounts are weighted higher than CT accounts, which are weighted
+    higher than news accounts.
+    
+    Args:
+        snapshot: TickerNarrativeSnapshot with account_details
+        smart_weight: Weight for smart accounts (default: 3.0)
+        ct_weight: Weight for CT accounts (default: 1.0)
+        news_weight: Weight for news accounts (default: 0.5)
+        
+    Returns:
+        Dictionary with weighted metrics
+    """
+    if not snapshot.account_details:
+        return {
+            "weighted_mentions": snapshot.total_mentions,
+            "smart_account_mentions": 0,
+            "ct_account_mentions": 0,
+            "news_account_mentions": 0,
+            "organic_weighted_mentions": snapshot.total_mentions
+        }
+    
+    smart_count = sum(1 for acc in snapshot.account_details if acc.account_type == "smart")
+    ct_count = sum(1 for acc in snapshot.account_details if acc.account_type == "ct")
+    news_count = sum(1 for acc in snapshot.account_details if acc.account_type == "news")
+    
+    weighted_mentions = (
+        smart_count * smart_weight +
+        ct_count * ct_weight +
+        news_count * news_weight
+    )
+    
+    # Organic mentions (excluding news)
+    organic_weighted = (
+        smart_count * smart_weight +
+        ct_count * ct_weight
+    )
+    
+    return {
+        "weighted_mentions": weighted_mentions,
+        "smart_account_mentions": smart_count,
+        "ct_account_mentions": ct_count,
+        "news_account_mentions": news_count,
+        "organic_weighted_mentions": organic_weighted,
+        "weight_ratio": weighted_mentions / snapshot.total_mentions if snapshot.total_mentions > 0 else 0
+    }
+
+
+# ============================================================================
+# EVENT-DRIVEN FILTERING
+# ============================================================================
+
+def is_organic_narrative_spike(
+    ticker: str,
+    window: str = "1h",
+    min_mentions: int = 20,
+    max_event_mentions: int = 100,
+    use_cache: bool = True
+) -> Dict[str, Any]:
+    """
+    Determine if a narrative spike is organic (not news-driven).
+    
+    Args:
+        ticker: Ticker symbol
+        window: Time window
+        min_mentions: Minimum mentions to consider it a spike
+        max_event_mentions: Maximum event mentions to still consider organic
+        use_cache: Whether to use cached results
+        
+    Returns:
+        Dictionary with analysis results
+    """
+    snapshot = get_ticker_narrative_snapshot(ticker, window, use_cache)
+    if not snapshot:
+        return {
+            "is_organic": False,
+            "reason": "No data available",
+            "total_mentions": 0,
+            "news_mentions": 0,
+            "event_mentions": 0
+        }
+    
+    # Check for events related to this ticker
+    events = get_event_summary([ticker], window, use_cache)
+    event_mentions = sum(e.mentions for e in events) if events else 0
+    
+    # Calculate organic score
+    news_ratio = snapshot.news_mentions / snapshot.total_mentions if snapshot.total_mentions > 0 else 0
+    event_ratio = event_mentions / snapshot.total_mentions if snapshot.total_mentions > 0 else 0
+    
+    is_organic = (
+        snapshot.total_mentions >= min_mentions and
+        snapshot.news_mentions <= max_event_mentions and
+        event_mentions <= max_event_mentions and
+        news_ratio < 0.3 and  # Less than 30% news-driven
+        event_ratio < 0.3  # Less than 30% event-driven
+    )
+    
+    return {
+        "is_organic": is_organic,
+        "total_mentions": snapshot.total_mentions,
+        "news_mentions": snapshot.news_mentions,
+        "organic_mentions": snapshot.organic_mentions,
+        "event_mentions": event_mentions,
+        "news_ratio": news_ratio,
+        "event_ratio": event_ratio,
+        "reason": "Organic spike" if is_organic else f"News/event-driven (news: {news_ratio:.1%}, events: {event_ratio:.1%})",
+        "snapshot": snapshot,
+        "events": events
     }
 

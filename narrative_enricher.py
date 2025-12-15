@@ -22,6 +22,12 @@ class EnrichedSnapshot:
     new_accounts: List[str] = field(default_factory=list)
     lost_accounts: List[str] = field(default_factory=list)
     source_query: str = ""
+    # New fields from enhancements
+    sentiment_score: Optional[float] = None
+    news_mentions: int = 0
+    organic_mentions: int = 0
+    platform: Optional[str] = None
+    weighted_mentions: Optional[float] = None  # Account-type weighted
 
 
 class NarrativeEnricher:
@@ -127,12 +133,18 @@ class NarrativeEnricher:
 
     def enrich_snapshot(self, snap: TickerNarrativeSnapshot) -> EnrichedSnapshot:
         """Compute velocity, acceleration, and account churn"""
+        from elfa_client import calculate_weighted_mentions
+        
         last_snap, prev_snap = self.get_last_two_snapshots(snap.ticker, snap.window)
         delta_mentions = snap.total_mentions
         acceleration = None  # Default to None (insufficient data)
         # Create defensive copy to avoid reference issues
         new_accounts = list(snap.top_smart_accounts) if snap.top_smart_accounts else []
         lost_accounts = []
+        
+        # Calculate weighted mentions based on account types
+        weighted_data = calculate_weighted_mentions(snap)
+        weighted_mentions = weighted_data.get("weighted_mentions")
 
         if last_snap:
             # Velocity: change in mentions from last snapshot
@@ -166,7 +178,12 @@ class NarrativeEnricher:
             acceleration=acceleration,
             new_accounts=new_accounts,
             lost_accounts=lost_accounts,
-            source_query=snap.source_query
+            source_query=snap.source_query,
+            sentiment_score=snap.sentiment_score,
+            news_mentions=snap.news_mentions,
+            organic_mentions=snap.organic_mentions,
+            platform=snap.platform,
+            weighted_mentions=weighted_mentions
         )
 
         # store snapshot after enrichment for next comparison
