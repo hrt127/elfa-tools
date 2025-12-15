@@ -7,11 +7,23 @@ data to compute velocity and acceleration, and displays results in CLI or export
 """
 import argparse
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
 from elfa_client import get_ticker_narrative_snapshot
 from narrative_enricher import NarrativeEnricher, EnrichedSnapshot
+
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    # Load .env from project root
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    # python-dotenv not installed, skip .env loading
+    pass
 
 
 def format_number(num: int) -> str:
@@ -203,6 +215,7 @@ def export_markdown(enriched_snapshots: List[EnrichedSnapshot], window: str, out
 
 def main():
     """Main CLI entry point."""
+    
     parser = argparse.ArgumentParser(
         description="Next-Gen Narrative Radar - Track ticker narrative metrics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -245,6 +258,17 @@ Examples:
     
     args = parser.parse_args()
     
+    # Check for API key upfront with clear error message
+    api_key = os.getenv("ELFA_API_KEY")
+    if not api_key:
+        print("❌ ERROR: ELFA_API_KEY environment variable is not set.", file=sys.stderr)
+        print("\nTo fix this:", file=sys.stderr)
+        print("  1. Get your API key from: https://docs.elfa.ai", file=sys.stderr)
+        print("  2. Set it in your environment:", file=sys.stderr)
+        print("     export ELFA_API_KEY='your_api_key_here'", file=sys.stderr)
+        print("\n  Or create a .env file (see env.example)", file=sys.stderr)
+        sys.exit(1)
+    
     # Initialize enricher
     enricher = NarrativeEnricher()
     
@@ -277,6 +301,12 @@ Examples:
     
     if not enriched_snapshots:
         print("\n❌ No data available. Exiting.")
+        print("\n💡 Troubleshooting tips:", file=sys.stderr)
+        print("  - Check the warning messages above for details", file=sys.stderr)
+        print("  - Verify your API key is correct and has access", file=sys.stderr)
+        print("  - Check your internet connection", file=sys.stderr)
+        print("  - Try a different time window (e.g., --window 24h)", file=sys.stderr)
+        print("  - Verify the ticker symbol is valid", file=sys.stderr)
         sys.exit(1)
     
     # Display CLI radar

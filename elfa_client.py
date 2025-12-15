@@ -1,9 +1,21 @@
 import os
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from collections import defaultdict
 import requests  # pyright: ignore[reportMissingModuleSource]
+
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    # Load .env from project root
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    # python-dotenv not installed, skip .env loading
+    pass
 
 
 # Global state for rate limiting and caching
@@ -144,12 +156,22 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
 
             # Handle other HTTP errors
             if response.status_code == 401:
+                print("Warning: API authentication failed (401). Check your API key.")
                 return None
 
             if response.status_code == 404:
+                print(f"Warning: API endpoint not found (404) for ticker {ticker}.")
                 return None
 
             if response.status_code >= 400:
+                error_msg = f"Warning: API returned error {response.status_code}"
+                try:
+                    error_body = response.text[:200]
+                    if error_body:
+                        error_msg += f": {error_body}"
+                except:
+                    pass
+                print(error_msg)
                 return None
 
             # Parse response

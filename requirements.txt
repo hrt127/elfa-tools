@@ -1,5 +1,6 @@
 # MVP Core Dependencies
 requests>=2.31.0
+python-dotenv>=1.0.0  # For loading .env files
 
 # Optional (for v1.1 features in optional/ directory)
 # Uncomment as needed:

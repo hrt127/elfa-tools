@@ -93,15 +93,18 @@ class TestNarrativeEnrichmentWorkflow:
                 assert isinstance(enriched, EnrichedSnapshot)
                 assert enriched.ticker == "BTC"
                 assert enriched.delta_mentions == 150  # First snapshot = total mentions
-                assert enriched.acceleration == 0  # Cannot calculate acceleration yet
+                assert enriched.acceleration is None  # Cannot calculate acceleration yet (needs 3+ snapshots)
 
-    def test_enrichment_with_history(self, sample_snapshot):
+    def test_enrichment_with_history(self, sample_snapshot, tmp_path):
         """Test enrichment with historical data."""
+        # Use temporary database for test isolation
+        temp_db = tmp_path / "test_narrative.db"
+        
         # First snapshot
-        enriched1 = enrich_snapshot(sample_snapshot)
+        enriched1 = enrich_snapshot(sample_snapshot, db_path=temp_db)
 
         assert enriched1 is not None
-        assert enriched1.delta_mentions == 0
+        assert enriched1.delta_mentions == 150  # First snapshot = total mentions (no previous data)
 
         # Second snapshot with more mentions
         snapshot2 = TickerNarrativeSnapshot(
@@ -113,11 +116,11 @@ class TestNarrativeEnrichmentWorkflow:
             source_query="test_query_2",
         )
 
-        enriched2 = enrich_snapshot(snapshot2)
+        enriched2 = enrich_snapshot(snapshot2, db_path=temp_db)
 
         assert enriched2 is not None
         assert enriched2.delta_mentions == 50  # 200 - 150
-        assert enriched2.acceleration > 0  # Positive acceleration
+        assert enriched2.acceleration is None  # Need 3+ snapshots for acceleration
 
     def test_enrichment_tracks_account_churn(self, sample_snapshot):
         """Test enrichment tracks account churn."""
@@ -267,9 +270,13 @@ class TestDecisionMomentWorkflow:
 class TestEndToEndWorkflow:
     """Test complete end-to-end workflow."""
 
-    def test_complete_narrative_analysis_workflow(self, mock_elfa_api_response):
+    def test_complete_narrative_analysis_workflow(self, mock_elfa_api_response, tmp_path):
         """Test complete workflow from API to Decision Moment."""
-        with patch("elfa_client.requests.get") as mock_get:
+        # Use temporary database for test isolation
+        temp_db = tmp_path / "test_narrative.db"
+        
+        with patch("elfa_client.requests.get") as mock_get, \
+             patch.dict(os.environ, {"ELFA_API_KEY": "test_key"}):
             # Mock API response
             mock_response = Mock()
             mock_response.status_code = 200
@@ -277,11 +284,11 @@ class TestEndToEndWorkflow:
             mock_get.return_value = mock_response
 
             # Step 1: Fetch from API
-            snapshot = get_ticker_narrative_snapshot("BTC", "4h")
+            snapshot = get_ticker_narrative_snapshot("BTC", "4h", use_cache=False)
             assert snapshot is not None
 
             # Step 2: Enrich with temporal context
-            enriched = enrich_snapshot(snapshot)
+            enriched = enrich_snapshot(snapshot, db_path=temp_db)
             assert enriched is not None
 
             # Step 3: Create Decision Moment (if significant)

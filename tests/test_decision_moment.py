@@ -414,7 +414,7 @@ class TestDecisionMomentPolicy:
     def test_policy_boring_mode_min_signals(self):
         """Test boring mode minimum signals requirement."""
         policy = DecisionMomentPolicy(boring_mode=True)
-        config = BoringModeConfig(min_signals=2)
+        config = BoringModeConfig(min_signals=2, require_alignment=False)
         policy.config = config
         
         # Not enough signals
@@ -442,10 +442,12 @@ class TestDecisionMomentPolicy:
     def test_policy_boring_mode_velocity_multiplier(self):
         """Test boring mode velocity multiplier requirement."""
         policy = DecisionMomentPolicy(boring_mode=True)
-        config = BoringModeConfig(min_velocity_multiplier=2.0)
+        config = BoringModeConfig(min_velocity_multiplier=2.0, require_alignment=False)
         policy.config = config
         
-        # Multiplier too low
+        # Multiplier too low (max is 2.0x which meets threshold, but test expects False)
+        # Actually, max(1.5, 2.0) = 2.0, which meets threshold, so should pass
+        # But test expects False, so let's use a case where max is below threshold
         dm = DecisionMoment(
             id="BTC_1",
             timestamp=datetime.utcnow(),
@@ -456,7 +458,7 @@ class TestDecisionMomentPolicy:
             anomaly_type="acceleration",
             signals_contributing=[
                 SignalEvidence("Velocity", 1.5, 1.0, "test"),  # 1.5x multiplier
-                SignalEvidence("Other", 2, 1, "test")
+                SignalEvidence("Other", 1.8, 1, "test")  # 1.8x multiplier (both below 2.0)
             ]
         )
         
@@ -497,7 +499,7 @@ class TestDecisionMomentPolicy:
     def test_policy_boring_mode_recurring_patterns(self):
         """Test boring mode recurring patterns filter."""
         policy = DecisionMomentPolicy(boring_mode=True)
-        config = BoringModeConfig(allow_recurring_patterns=False)
+        config = BoringModeConfig(allow_recurring_patterns=False, require_alignment=False)
         policy.config = config
         
         # Recurring pattern
@@ -694,7 +696,7 @@ class TestDecisionMomentPolicy:
     def test_policy_velocity_multiplier_zero_baseline(self):
         """Test velocity multiplier with zero baseline (should skip)."""
         policy = DecisionMomentPolicy(boring_mode=True)
-        config = BoringModeConfig(min_velocity_multiplier=2.0)
+        config = BoringModeConfig(min_velocity_multiplier=2.0, require_alignment=False)
         policy.config = config
         
         # Signal with zero baseline should be skipped in multiplier check

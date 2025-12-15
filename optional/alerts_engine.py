@@ -409,7 +409,7 @@ class RuleFactory:
         return AlertRule(
             name=f"{ticker}_anomaly",
             ticker=ticker,
-            condition=lambda d: d.get('z_score') and abs(d['z_score']) >= 2.0,
+            condition=lambda d: (d.get('z_score') is not None) and abs(d['z_score']) >= 2.0,
             message_template=(
                 "🚨 ANOMALY: {ticker}\n"
                 "Current: {current_mentions} mentions\n"

@@ -226,6 +226,11 @@ class TestGetTickerNarrativeSnapshot:
     
     def test_flexible_field_mapping(self, mock_env_elfa_api_key):
         """Test that function handles different field names."""
+        # Clear cache and rate limit tracker to ensure test isolation
+        from elfa_client import _cache, _rate_limit_tracker
+        _cache.clear()
+        _rate_limit_tracker.clear()
+        
         with patch('elfa_client.requests.get') as mock_get:
             mock_response = Mock()
             mock_response.status_code = 200
