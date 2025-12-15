@@ -25,6 +25,14 @@ _cache_ttl = 300  # 5 minutes default cache TTL
 
 
 @dataclass
+class AccountInfo:
+    """Account information with type classification."""
+    username: str
+    account_type: Optional[str] = None  # "smart", "ct", "news", or None
+    platform: Optional[str] = None  # "twitter", "telegram", or None
+
+
+@dataclass
 class TickerNarrativeSnapshot:
     """Snapshot of ticker narrative data including mentions and mindshare."""
     ticker: str
@@ -33,6 +41,12 @@ class TickerNarrativeSnapshot:
     mindshare_score: Optional[float]
     top_smart_accounts: List[str]
     source_query: str = field(default="")  # For audit trail - the exact API query made
+    # New fields from enhancements
+    sentiment_score: Optional[float] = None  # -1 to +1, bullish/bearish
+    account_details: List[AccountInfo] = field(default_factory=list)  # Account info with types
+    platform: Optional[str] = None  # "twitter", "telegram", or None (for cross-platform)
+    news_mentions: int = 0  # Mentions from news accounts
+    organic_mentions: int = 0  # Mentions excluding news
 
 
 def _get_cache_key(ticker: str, window: str) -> str:
@@ -172,6 +186,13 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
                 except:
                     pass
                 print(error_msg)
+                
+                # For 500 errors, provide helpful context
+                if response.status_code == 500:
+                    print("Note: This is a server-side error from Elfa's API. The request format is correct.")
+                    print("      This may be a temporary issue. Try again in a few minutes.")
+                    print("      If the problem persists, contact Elfa support with the error ID above.")
+                
                 return None
 
             # Parse response
@@ -200,7 +221,19 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
 
             total_mentions = ticker_data.get("total_mentions") or ticker_data.get("mentions") or ticker_data.get("count") or 0
             mindshare_score = ticker_data.get("mindshare_score") or ticker_data.get("mindshare") or ticker_data.get("score")
+            
+            # Extract sentiment score (if available)
+            sentiment_score = ticker_data.get("sentiment_score") or ticker_data.get("sentiment")
+            if sentiment_score is not None:
+                try:
+                    sentiment_score = float(sentiment_score)
+                except (ValueError, TypeError):
+                    sentiment_score = None
+            
             top_smart_accounts = []
+            account_details = []
+            news_mentions = 0
+            organic_mentions = int(total_mentions) if total_mentions else 0
 
             accounts_data = (
                 ticker_data.get("top_smart_accounts") or
@@ -211,7 +244,7 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
             )
 
             if isinstance(accounts_data, list):
-                for account in accounts_data[:3]:
+                for account in accounts_data[:10]:  # Extract more accounts for type analysis
                     if isinstance(account, dict):
                         username = (
                             account.get("username") or
@@ -221,9 +254,34 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
                             str(account.get("id", ""))
                         )
                         if username:
-                            top_smart_accounts.append(username)
+                            # Extract account type if available
+                            account_type = account.get("type") or account.get("account_type")
+                            if account_type:
+                                account_type = str(account_type).lower()
+                                if account_type not in ["smart", "ct", "news"]:
+                                    account_type = None
+                            
+                            # Count news accounts
+                            if account_type == "news":
+                                news_mentions += 1
+                            
+                            account_info = AccountInfo(
+                                username=username,
+                                account_type=account_type,
+                                platform=None  # Will be set if source filtering is used
+                            )
+                            account_details.append(account_info)
+                            
+                            # Keep top 3 for backward compatibility
+                            if len(top_smart_accounts) < 3:
+                                top_smart_accounts.append(username)
                     elif isinstance(account, str):
                         top_smart_accounts.append(account)
+                        account_details.append(AccountInfo(username=account))
+
+            # Calculate organic mentions (excluding news)
+            if news_mentions > 0:
+                organic_mentions = max(0, organic_mentions - news_mentions)
 
             result = TickerNarrativeSnapshot(
                 ticker=ticker,
@@ -231,7 +289,12 @@ def get_ticker_narrative_snapshot(ticker: str, window: str = "1h", use_cache: bo
                 total_mentions=int(total_mentions) if total_mentions else 0,
                 mindshare_score=float(mindshare_score) if mindshare_score is not None else None,
                 top_smart_accounts=top_smart_accounts[:3],
-                source_query=source_query
+                source_query=source_query,
+                sentiment_score=sentiment_score,
+                account_details=account_details,
+                platform=None,  # Default to None (can be set via source parameter)
+                news_mentions=news_mentions,
+                organic_mentions=organic_mentions
             )
 
             # Cache the result
