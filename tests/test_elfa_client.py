@@ -253,6 +253,98 @@ class TestGetTickerNarrativeSnapshot:
             assert result is not None
             assert result.total_mentions == 100
             assert result.mindshare_score == 0.15
+    
+    def test_new_optional_fields_sentiment(self, mock_env_elfa_api_key):
+        """Test handling of new optional sentiment_score field."""
+        from elfa_client import _cache, _rate_limit_tracker
+        _cache.clear()
+        _rate_limit_tracker.clear()
+        
+        with patch('elfa_client.requests.get') as mock_get:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "results": [
+                    {
+                        "ticker": "BTC",
+                        "total_mentions": 100,
+                        "mindshare_score": 0.15,
+                        "sentiment_score": 0.75,  # New field
+                        "top_smart_accounts": []
+                    }
+                ]
+            }
+            mock_response.headers = {}
+            mock_get.return_value = mock_response
+            
+            result = get_ticker_narrative_snapshot("BTC", "1h", use_cache=False)
+            
+            assert result is not None
+            assert result.sentiment_score == 0.75
+    
+    def test_new_optional_fields_missing_sentiment(self, mock_env_elfa_api_key):
+        """Test backward compatibility when sentiment_score is missing."""
+        from elfa_client import _cache, _rate_limit_tracker
+        _cache.clear()
+        _rate_limit_tracker.clear()
+        
+        with patch('elfa_client.requests.get') as mock_get:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "results": [
+                    {
+                        "ticker": "BTC",
+                        "total_mentions": 100,
+                        "mindshare_score": 0.15,
+                        "top_smart_accounts": []
+                        # No sentiment_score - should default to None
+                    }
+                ]
+            }
+            mock_response.headers = {}
+            mock_get.return_value = mock_response
+            
+            result = get_ticker_narrative_snapshot("BTC", "1h", use_cache=False)
+            
+            assert result is not None
+            assert result.sentiment_score is None  # Should handle missing field gracefully
+    
+    def test_new_optional_fields_account_details(self, mock_env_elfa_api_key):
+        """Test handling of new account_details field with account types."""
+        from elfa_client import AccountInfo
+        from elfa_client import _cache, _rate_limit_tracker
+        _cache.clear()
+        _rate_limit_tracker.clear()
+        
+        with patch('elfa_client.requests.get') as mock_get:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "results": [
+                    {
+                        "ticker": "BTC",
+                        "total_mentions": 100,
+                        "mindshare_score": 0.15,
+                        "top_smart_accounts": [
+                            {"username": "account1", "type": "smart"},
+                            {"username": "account2", "type": "ct"},
+                            {"username": "account3", "type": "news"}
+                        ]
+                    }
+                ]
+            }
+            mock_response.headers = {}
+            mock_get.return_value = mock_response
+            
+            result = get_ticker_narrative_snapshot("BTC", "1h", use_cache=False)
+            
+            assert result is not None
+            assert len(result.account_details) == 3
+            assert result.account_details[0].username == "account1"
+            assert result.account_details[0].account_type == "smart"
+            assert result.account_details[1].account_type == "ct"
+            assert result.account_details[2].account_type == "news"
 
 
 class TestRateLimitTracking:

@@ -2,7 +2,7 @@ import os
 import time
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Dict, Any, Tuple, TypeVar
 from collections import defaultdict
 import requests  # pyright: ignore[reportMissingModuleSource]
@@ -884,7 +884,8 @@ def get_cross_platform_snapshot(
     # Try to get Twitter data (default)
     twitter_snap = get_ticker_narrative_snapshot(ticker, window, use_cache)
     if twitter_snap:
-        twitter_snap.platform = "twitter"
+        # Create a copy to avoid mutating the cached object
+        twitter_snap = replace(twitter_snap, platform="twitter")
         results["twitter"] = twitter_snap
     
     # Try to get Telegram data (might need source parameter)
