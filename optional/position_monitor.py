@@ -30,8 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from elfa_client import get_ticker_narrative_snapshot
 from narrative_enricher import NarrativeEnricher
-from alerts_engine import AlertsEngine, AlertRule
-from delta_store import DeltaStore
+from optional.alerts_engine import AlertsEngine, AlertRule
+from optional.delta_store import DeltaStore
 
 
 # ============================================================================

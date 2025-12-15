@@ -129,8 +129,9 @@ class NarrativeEnricher:
         """Compute velocity, acceleration, and account churn"""
         last_snap, prev_snap = self.get_last_two_snapshots(snap.ticker, snap.window)
         delta_mentions = snap.total_mentions
-        acceleration = 0
-        new_accounts = snap.top_smart_accounts
+        acceleration = None  # Default to None (insufficient data)
+        # Create defensive copy to avoid reference issues
+        new_accounts = list(snap.top_smart_accounts) if snap.top_smart_accounts else []
         lost_accounts = []
 
         if last_snap:
@@ -175,6 +176,40 @@ class NarrativeEnricher:
     def enrich_batch(self, snapshots: List[TickerNarrativeSnapshot]) -> List[EnrichedSnapshot]:
         """Enrich multiple snapshots at once"""
         return [self.enrich_snapshot(snap) for snap in snapshots]
+
+
+# -------------------------------
+# Convenience function for simple usage
+# -------------------------------
+_default_enricher = None
+
+def enrich_snapshot(snap: Optional[TickerNarrativeSnapshot], db_path: Optional[Path] = None) -> Optional[EnrichedSnapshot]:
+    """
+    Convenience function to enrich a snapshot.
+    
+    Uses a default global enricher instance for convenience.
+    For production use, consider creating your own NarrativeEnricher instance.
+    
+    Args:
+        snap: TickerNarrativeSnapshot to enrich, or None
+        db_path: Optional custom database path
+        
+    Returns:
+        EnrichedSnapshot or None if snap is None
+    """
+    global _default_enricher
+    
+    if snap is None:
+        return None
+    
+    if db_path is not None:
+        enricher = NarrativeEnricher(db_path=db_path)
+    else:
+        if _default_enricher is None:
+            _default_enricher = NarrativeEnricher()
+        enricher = _default_enricher
+    
+    return enricher.enrich_snapshot(snap)
 
 
 # -------------------------------

@@ -18,7 +18,7 @@ Note: This is a template/skeleton. Actual implementation depends on:
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from collections import defaultdict
 import requests  # pyright: ignore[reportMissingModuleSource]
 
@@ -89,15 +89,20 @@ def _cache_result(cache_key: str, result: OnChainData, ttl: int = None) -> None:
 def get_onchain_data(
     ticker: str,
     use_cache: bool = True,
-    api_provider: str = "glassnode"  # Default, can be extended
+    api_provider: str = "glassnode",
+    use_fallback: bool = True,
+    fallback_providers: Optional[List[str]] = None
 ) -> Optional[OnChainData]:
     """
-    Get on-chain metrics for a ticker.
+    Get on-chain metrics for a ticker with automatic fallback to backup providers.
     
     Args:
         ticker: Ticker symbol (e.g., "BTC", "ETH")
         use_cache: Whether to use cached results
-        api_provider: API provider ("glassnode" or "cryptoquant")
+        api_provider: Primary API provider ("glassnode", "cryptoquant", "zapper", "zerion", "covalent")
+        use_fallback: If True, automatically try backup providers if primary fails
+        fallback_providers: List of backup providers to try. If None and use_fallback=True,
+                          uses default fallback chain: ["glassnode", "cryptoquant", "zapper", "zerion", "covalent"]
     
     Returns:
         OnChainData with on-chain metrics, or None if unavailable.
@@ -111,20 +116,30 @@ def get_onchain_data(
             if cached_result is not None:
                 return cached_result
         
-        # Check rate limiting
+        # Check rate limiting for primary provider
         if _is_rate_limited(api_provider, max_requests=10, window_seconds=60):
-            print(f"Warning: Rate limit reached for {api_provider}")
-            return None
+            if use_fallback:
+                print(f"Warning: Rate limit reached for {api_provider}, trying fallback providers...")
+            else:
+                print(f"Warning: Rate limit reached for {api_provider}")
+                return None
         
-        # Fetch data based on provider
-        result = None
-        if api_provider.lower() == "glassnode":
-            result = _fetch_glassnode_onchain_data(ticker)
-        elif api_provider.lower() == "cryptoquant":
-            result = _fetch_cryptoquant_onchain_data(ticker)
+        # Use provider registry with fallback if enabled
+        if use_fallback:
+            from optional.provider_registry import fetch_with_fallback
+            result = fetch_with_fallback(
+                ticker=ticker,
+                primary_provider=api_provider,
+                fallback_providers=fallback_providers
+            )
         else:
-            print(f"Warning: Unknown provider '{api_provider}'. Supported: glassnode, cryptoquant")
-            return None
+            # Single provider mode (legacy behavior)
+            from optional.provider_registry import get_provider
+            provider_fn = get_provider(api_provider)
+            if not provider_fn:
+                print(f"Warning: Unknown provider '{api_provider}'. Available: {', '.join(get_provider.__module__)}")
+                return None
+            result = provider_fn(ticker)
         
         # Cache result if successful
         if result and use_cache:
@@ -302,18 +317,36 @@ def clear_cache() -> None:
 
 # Usage example
 if __name__ == "__main__":
-    # Example: Get BTC on-chain data
-    btc_data = get_onchain_data("BTC")
+    # Example 1: Get BTC on-chain data with automatic fallback
+    print("Example 1: Automatic fallback (Glassnode → CryptoQuant → ...)")
+    btc_data = get_onchain_data("BTC", use_cache=False, use_fallback=True)
     if btc_data:
-        print(f"\nBTC On-Chain Data:")
+        print(f"\n✅ BTC On-Chain Data (from {btc_data.source_query.split(':')[0]}):")
         if btc_data.exchange_netflow_btc:
-            print(f"Exchange Net Flow: {btc_data.exchange_netflow_btc:+.2f} BTC")
+            print(f"   Exchange Net Flow: {btc_data.exchange_netflow_btc:+.2f} BTC")
         if btc_data.whale_balance_change:
             status = "Accumulating" if btc_data.whale_balance_change > 0 else "Distributing"
-            print(f"Whale Activity: {status}")
+            print(f"   Whale Activity: {status}")
         if btc_data.active_addresses_24h:
-            print(f"Active Addresses (24h): {btc_data.active_addresses_24h:,}")
-        print(f"Source: {btc_data.source_query}")
+            print(f"   Active Addresses (24h): {btc_data.active_addresses_24h:,}")
+        print(f"   Source: {btc_data.source_query}")
     else:
-        print("On-chain data not available (provider not implemented)")
+        print("❌ On-chain data not available (all providers failed)")
+    
+    # Example 2: Single provider (no fallback)
+    print("\n\nExample 2: Single provider mode (no fallback)")
+    btc_data2 = get_onchain_data("BTC", use_cache=False, api_provider="glassnode", use_fallback=False)
+    if btc_data2:
+        print(f"✅ Got data from: {btc_data2.source_query}")
+    else:
+        print("❌ Provider failed")
+    
+    # Example 3: Custom fallback chain
+    print("\n\nExample 3: Custom fallback chain")
+    btc_data3 = get_onchain_data("BTC", use_cache=False, api_provider="cryptoquant", 
+                                  use_fallback=True, fallback_providers=["glassnode", "zapper"])
+    if btc_data3:
+        print(f"✅ Got data from: {btc_data3.source_query}")
+    else:
+        print("❌ All providers failed")
 

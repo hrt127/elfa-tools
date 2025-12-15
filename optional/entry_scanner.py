@@ -26,9 +26,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from elfa_client import get_ticker_narrative_snapshot
 from narrative_enricher import NarrativeEnricher
-from delta_store import DeltaStore
-from signal_composer import SignalComposer
-from perp_client import get_perp_market_data
+from optional.delta_store import DeltaStore
+from optional.signal_composer import SignalComposer
+from optional.perp_client import get_perp_market_data
 
 
 class EntryScanner:
@@ -148,6 +148,89 @@ class EntryScanner:
         except Exception as e:
             print(f"Warning: Failed to scan {ticker}: {e}")
             return None
+    
+    def scan(self, enriched_snapshots: List) -> List[Dict]:
+        """
+        Scan a list of enriched snapshots for entry opportunities.
+        
+        Args:
+            enriched_snapshots: List of EnrichedSnapshot objects
+            
+        Returns:
+            List of scan results, sorted by conviction (highest first)
+        """
+        results = []
+        for enriched in enriched_snapshots:
+            if enriched is None:
+                continue
+            try:
+                # Store snapshot
+                self.store.insert(enriched)
+                
+                # Get historical context
+                velocity_data = self.store.calculate_velocity(enriched.ticker, window=enriched.window)
+                anomaly = self.store.detect_anomalies(enriched.ticker, window=enriched.window, std_threshold=2.0)
+                
+                # Get market data
+                market_data = get_perp_market_data(enriched.ticker)
+                
+                # Generate composite signal
+                signal = self.composer.compose(
+                    ticker=enriched.ticker,
+                    narrative_data=enriched,
+                    market_data={
+                        'funding_rate': market_data.funding_rate if market_data else 0,
+                        'price_change_24h': market_data.price_change_24h if market_data else 0,
+                        'volume_ratio': market_data.volume_ratio if market_data else 1.0
+                    } if market_data else None
+                )
+                
+                # Analyze for entry setups
+                setups = []
+                conviction = 0.0
+                reasoning = []
+                
+                # 1. Narrative Spike
+                if enriched.delta_mentions > 20 and enriched.acceleration is not None and enriched.acceleration > 10:
+                    setups.append("spike")
+                    conviction += 0.3
+                    reasoning.append(f"🚀 Narrative spike: +{enriched.delta_mentions} mentions")
+                
+                # 2. Strong Velocity
+                if velocity_data and velocity_data.get('mentions_velocity', 0) > 15:
+                    setups.append("momentum")
+                    conviction += 0.25
+                    reasoning.append(f"📈 Strong momentum: {velocity_data['mentions_velocity']:.1f} mentions/snapshot")
+                
+                # 3. Anomaly
+                if anomaly and abs(anomaly['z_score']) >= 2.5:
+                    setups.append("anomaly")
+                    conviction += 0.2
+                    direction = "spike" if anomaly['z_score'] > 0 else "drop"
+                    reasoning.append(f"🚨 Statistical anomaly: {anomaly['z_score']:+.1f}σ ({direction})")
+                
+                # 4. Smart Money
+                if enriched.top_smart_accounts and len(enriched.top_smart_accounts) >= 3:
+                    setups.append("smart_money")
+                    conviction += 0.25
+                    reasoning.append(f"💡 Smart money activity: {len(enriched.top_smart_accounts)} accounts")
+                
+                results.append({
+                    'ticker': enriched.ticker,
+                    'setups': setups,
+                    'conviction': min(conviction, 1.0),  # Cap at 1.0
+                    'reasoning': reasoning,
+                    'signal': signal,
+                    'velocity': velocity_data,
+                    'anomaly': anomaly
+                })
+            except Exception as e:
+                print(f"Warning: Failed to scan {enriched.ticker if enriched else 'unknown'}: {e}")
+                continue
+        
+        # Sort by conviction (highest first)
+        results.sort(key=lambda x: x['conviction'], reverse=True)
+        return results
     
     def scan_watchlist(self, tickers: List[str], window: str = "4h") -> List[Dict]:
         """Scan multiple tickers and return sorted by conviction."""

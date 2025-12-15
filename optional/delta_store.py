@@ -26,7 +26,7 @@ from narrative_enricher import EnrichedSnapshot
 
 class DeltaStore:
     """Lightweight time-series store for narrative signals."""
-    
+
     def __init__(self, db_path: str = "narrative_chronicle.duckdb"):
         """
         Initialize DuckDB connection and create tables if needed.
@@ -49,7 +49,7 @@ class DeltaStore:
                 CREATE TABLE IF NOT EXISTS narrative_snapshots (
                     id INTEGER PRIMARY KEY,
                     ticker VARCHAR NOT NULL,
-                    window VARCHAR NOT NULL,
+                    "window" VARCHAR NOT NULL,
                     mentions INTEGER NOT NULL,
                     mindshare DOUBLE,
                     smart_accounts VARCHAR,
@@ -58,6 +58,9 @@ class DeltaStore:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # DuckDB doesn't support AUTO_INCREMENT directly, so we'll use a sequence
+            # But actually, we can just omit id and let DuckDB handle it
+            # Let's check if we need to modify the INSERT
             
             # Index for fast queries
             self.conn.execute("""
@@ -67,7 +70,7 @@ class DeltaStore:
             
             self.conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_window_timestamp 
-                ON narrative_snapshots(window, timestamp DESC)
+                ON narrative_snapshots("window", timestamp DESC)
             """)
         except Exception as e:
             print(f"Warning: Failed to initialize tables: {e}")
@@ -109,11 +112,16 @@ class DeltaStore:
             elif not isinstance(timestamp, datetime):
                 timestamp = datetime.utcnow()
             
+            # Get next ID (DuckDB doesn't have AUTO_INCREMENT, so we calculate it)
+            max_id_result = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM narrative_snapshots").fetchone()
+            next_id = (max_id_result[0] if max_id_result else 0) + 1
+            
             self.conn.execute("""
                 INSERT INTO narrative_snapshots 
-                (ticker, window, mentions, mindshare, smart_accounts, timestamp, source_query)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, ticker, "window", mentions, mindshare, smart_accounts, timestamp, source_query)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                next_id,
                 snapshot.ticker,
                 snapshot.window,
                 mentions,
@@ -140,9 +148,9 @@ class DeltaStore:
         """
         try:
             result = self.conn.execute("""
-                SELECT ticker, window, mentions, mindshare, smart_accounts, timestamp, source_query
+                SELECT ticker, "window", mentions, mindshare, smart_accounts, timestamp, source_query
                 FROM narrative_snapshots
-                WHERE ticker = ? AND window = ?
+                WHERE ticker = ? AND "window" = ?
                 ORDER BY timestamp DESC
                 LIMIT 1
             """, (ticker.upper(), window)).fetchone()
@@ -184,9 +192,9 @@ class DeltaStore:
             cutoff = datetime.utcnow() - timedelta(hours=hours_back)
             
             results = self.conn.execute("""
-                SELECT ticker, window, mentions, mindshare, smart_accounts, timestamp, source_query
+                SELECT ticker, "window", mentions, mindshare, smart_accounts, timestamp, source_query
                 FROM narrative_snapshots
-                WHERE ticker = ? AND window = ? AND timestamp >= ?
+                WHERE ticker = ? AND "window" = ? AND timestamp >= ?
                 ORDER BY timestamp ASC
             """, (ticker.upper(), window, cutoff)).fetchall()
             
@@ -348,16 +356,16 @@ class DeltaStore:
                 WITH latest AS (
                     SELECT 
                         ticker,
-                        window,
+                        "window",
                         mentions,
                         mindshare,
                         smart_accounts,
                         timestamp,
                         ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) as rn
                     FROM narrative_snapshots
-                    WHERE ticker IN ({placeholders}) AND window = ?
+                    WHERE ticker IN ({placeholders}) AND "window" = ?
                 )
-                SELECT ticker, window, mentions, mindshare, smart_accounts, timestamp
+                SELECT ticker, "window", mentions, mindshare, smart_accounts, timestamp
                 FROM latest
                 WHERE rn = 1
                 ORDER BY (COALESCE(mindshare, 0) * mentions) DESC

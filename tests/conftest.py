@@ -163,8 +163,20 @@ def temp_alerts_db_path(tmp_path):
 def clear_caches():
     """Clear all caches before each test."""
     from elfa_client import clear_cache
-    from perp_client import clear_cache as clear_perp_cache
-    from onchain_client import clear_cache as clear_onchain_cache
+    
+    # Optional modules - import gracefully
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from optional.perp_client import clear_cache as clear_perp_cache
+    except ImportError:
+        clear_perp_cache = lambda: None
+    
+    try:
+        from optional.onchain_client import clear_cache as clear_onchain_cache
+    except ImportError:
+        clear_onchain_cache = lambda: None
     
     clear_cache()
     clear_perp_cache()

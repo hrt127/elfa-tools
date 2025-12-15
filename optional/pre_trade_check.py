@@ -26,9 +26,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from elfa_client import get_ticker_narrative_snapshot
 from narrative_enricher import NarrativeEnricher
-from delta_store import DeltaStore
-from signal_composer import SignalComposer
-from perp_client import get_perp_market_data
+from optional.delta_store import DeltaStore
+from optional.signal_composer import SignalComposer
+from optional.perp_client import get_perp_market_data
 
 
 class PreTradeChecker:

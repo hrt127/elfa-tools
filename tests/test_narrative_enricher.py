@@ -40,8 +40,9 @@ class TestEnrichSnapshot:
         assert enriched.ticker == "BTC"
         assert enriched.total_mentions == 100
         assert enriched.delta_mentions == 100  # First snapshot = total
-        assert enriched.acceleration == 0  # Cannot calculate acceleration yet
-        assert len(enriched.new_accounts) == 0  # No previous to compare
+        assert enriched.acceleration is None  # Cannot calculate acceleration yet (needs 3+ snapshots)
+        # For first snapshot, all accounts are considered "new" since there's no baseline
+        assert len(enriched.new_accounts) == 3  # All accounts are new on first snapshot
         assert len(enriched.lost_accounts) == 0
     
     def test_second_snapshot(self, temp_db_path):
@@ -71,7 +72,7 @@ class TestEnrichSnapshot:
         enriched2 = enricher.enrich_snapshot(snapshot2)
         
         assert enriched2.delta_mentions == 20  # 120 - 100
-        assert enriched2.acceleration == 0  # Only 2 snapshots, cannot calculate acceleration
+        assert enriched2.acceleration is None  # Only 2 snapshots, cannot calculate acceleration
         assert "account4" in enriched2.new_accounts
         assert "account3" in enriched2.lost_accounts
     
@@ -181,7 +182,7 @@ class TestEnrichSnapshot:
         enriched2 = enricher.enrich_snapshot(snapshot2)
         
         assert enriched2.delta_mentions == -20  # Negative delta
-        assert enriched2.acceleration == 0  # Only 2 snapshots
+        assert enriched2.acceleration is None  # Only 2 snapshots, cannot calculate acceleration
 
 
 class TestDatabasePersistence:

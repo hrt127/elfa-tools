@@ -65,6 +65,7 @@ def sample_enriched_snapshot():
     return EnrichedSnapshot(
         ticker="BTC",
         window="4h",
+        timestamp=datetime.utcnow(),
         total_mentions=100,
         mindshare_score=0.15,
         top_smart_accounts=["account1", "account2"],

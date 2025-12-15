@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from elfa_client import TickerNarrativeSnapshot
 from narrative_enricher import enrich_snapshot
-from optional.entry_scanner import EntryScanner, SetupType
+from optional.entry_scanner import EntryScanner
 
 
 @pytest.fixture
