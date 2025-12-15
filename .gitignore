@@ -1,0 +1,22 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs and coverage
+*.log
+.coverage
+htmlcov/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# IDE/editor configs
+.vscode/
+.idea/
